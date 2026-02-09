@@ -1,0 +1,306 @@
+{
+  "info": {
+    "name": "Watson WA API",
+    "_postman_id": "7b0db4d9-9b75-4f1e-9bcb-6f49c8b4f4b7",
+    "description": "Watson WA API - Self-hosted WhatsApp Web API (Baileys) with Redis durable queue.\n\nVariables:\n- baseUrl (e.g. http://localhost)\n- apiKey\n- adminKey\n",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost" },
+    { "key": "apiKey", "value": "YOUR_WA_API_KEY" },
+    { "key": "adminKey", "value": "YOUR_WA_ADMIN_KEY" },
+    { "key": "toPhone", "value": "27820000000" },
+    { "key": "toJid", "value": "27820000000@s.whatsapp.net" },
+    { "key": "groupJid", "value": "1203630xxxxx@g.us" },
+    { "key": "contactName", "value": "Oppies" }
+  ],
+  "item": [
+    {
+      "name": "Integration (x-api-key)",
+      "item": [
+        {
+          "name": "Health",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "x-api-key", "value": "{{apiKey}}" }],
+            "url": { "raw": "{{baseUrl}}/health", "host": ["{{baseUrl}}"], "path": ["health"] }
+          }
+        },
+        {
+          "name": "Send Text",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "x-api-key", "value": "{{apiKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"to\": \"{{toPhone}}\",\n  \"message\": \"Hello from Postman (Integration)\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/send", "host": ["{{baseUrl}}"], "path": ["send"] }
+          }
+        },
+        {
+          "name": "Send Image (multipart upload)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "x-api-key", "value": "{{apiKey}}" }],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "to", "value": "{{toPhone}}", "type": "text" },
+                { "key": "caption", "value": "Image upload from Postman", "type": "text" },
+                { "key": "image", "type": "file", "src": [] }
+              ]
+            },
+            "url": { "raw": "{{baseUrl}}/send/image", "host": ["{{baseUrl}}"], "path": ["send", "image"] }
+          }
+        },
+        {
+          "name": "Send Image (JSON imageUrl)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "x-api-key", "value": "{{apiKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"to\": \"{{toPhone}}\",\n  \"caption\": \"Image from URL\",\n  \"imageUrl\": \"https://via.placeholder.com/600x400.png\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/send/image", "host": ["{{baseUrl}}"], "path": ["send", "image"] }
+          }
+        },
+        {
+          "name": "Send Document (multipart upload)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "x-api-key", "value": "{{apiKey}}" }],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "to", "value": "{{toPhone}}", "type": "text" },
+                { "key": "fileName", "value": "report.pdf", "type": "text" },
+                { "key": "document", "type": "file", "src": [] }
+              ]
+            },
+            "url": { "raw": "{{baseUrl}}/send/document", "host": ["{{baseUrl}}"], "path": ["send", "document"] }
+          }
+        },
+        {
+          "name": "Send Document (JSON documentUrl)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "x-api-key", "value": "{{apiKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"to\": \"{{toPhone}}\",\n  \"documentUrl\": \"https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf\",\n  \"fileName\": \"dummy.pdf\",\n  \"mimetype\": \"application/pdf\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/send/document", "host": ["{{baseUrl}}"], "path": ["send", "document"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Admin (x-admin-key)",
+      "item": [
+        {
+          "name": "Targets (contacts + groups + WA groups)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "x-admin-key", "value": "{{adminKey}}" }],
+            "url": { "raw": "{{baseUrl}}/admin/targets", "host": ["{{baseUrl}}"], "path": ["admin", "targets"] }
+          }
+        },
+        {
+          "name": "Contacts - List",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "x-admin-key", "value": "{{adminKey}}" }],
+            "url": { "raw": "{{baseUrl}}/admin/contacts", "host": ["{{baseUrl}}"], "path": ["admin", "contacts"] }
+          }
+        },
+        {
+          "name": "Contacts - Upsert",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "x-admin-key", "value": "{{adminKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Oppies\",\n  \"msisdn\": \"0820000000\",\n  \"tags\": [\"vip\", \"internal\"]\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/admin/contacts", "host": ["{{baseUrl}}"], "path": ["admin", "contacts"] }
+          }
+        },
+        {
+          "name": "Contacts - Delete",
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "x-admin-key", "value": "{{adminKey}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/admin/contacts/Oppies",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "contacts", "Oppies"]
+            }
+          }
+        },
+        {
+          "name": "Groups - Upsert alias",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "x-admin-key", "value": "{{adminKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Support Team\",\n  \"jid\": \"{{groupJid}}\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/admin/groups", "host": ["{{baseUrl}}"], "path": ["admin", "groups"] }
+          }
+        },
+        {
+          "name": "Groups - Delete alias",
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "x-admin-key", "value": "{{adminKey}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/admin/groups/Support%20Team",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "groups", "Support%20Team"]
+            }
+          }
+        },
+        {
+          "name": "Messages - Chat list",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "x-admin-key", "value": "{{adminKey}}" }],
+            "url": { "raw": "{{baseUrl}}/admin/messages/chats", "host": ["{{baseUrl}}"], "path": ["admin", "messages", "chats"] }
+          }
+        },
+        {
+          "name": "Messages - Chat messages (by jid)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "x-admin-key", "value": "{{adminKey}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/admin/messages/chat/{{toJid}}?limit=200",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "messages", "chat", "{{toJid}}"],
+              "query": [{ "key": "limit", "value": "200" }]
+            }
+          }
+        },
+        {
+          "name": "Admin Send Text",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "x-admin-key", "value": "{{adminKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"to\": \"{{contactName}}\",\n  \"message\": \"Hello from Admin Send Text\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/admin/send/text", "host": ["{{baseUrl}}"], "path": ["admin", "send", "text"] }
+          }
+        },
+        {
+          "name": "Admin Send Image (multipart upload)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "x-admin-key", "value": "{{adminKey}}" }],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "to", "value": "{{contactName}}", "type": "text" },
+                { "key": "caption", "value": "Admin image upload", "type": "text" },
+                { "key": "image", "type": "file", "src": [] }
+              ]
+            },
+            "url": { "raw": "{{baseUrl}}/admin/send/image", "host": ["{{baseUrl}}"], "path": ["admin", "send", "image"] }
+          }
+        },
+        {
+          "name": "Admin Send Document (multipart upload)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "x-admin-key", "value": "{{adminKey}}" }],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "to", "value": "{{contactName}}", "type": "text" },
+                { "key": "fileName", "value": "doc.pdf", "type": "text" },
+                { "key": "document", "type": "file", "src": [] }
+              ]
+            },
+            "url": { "raw": "{{baseUrl}}/admin/send/document", "host": ["{{baseUrl}}"], "path": ["admin", "send", "document"] }
+          }
+        },
+        {
+          "name": "Automations - Get",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "x-admin-key", "value": "{{adminKey}}" }],
+            "url": { "raw": "{{baseUrl}}/admin/automations", "host": ["{{baseUrl}}"], "path": ["admin", "automations"] }
+          }
+        },
+        {
+          "name": "Automations - Update",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "x-admin-key", "value": "{{adminKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"enabled\": true,\n  \"webhookUrl\": \"https://n8n.yourdomain/webhook/xyz\",\n  \"sharedSecret\": \"YOUR_SHARED_SECRET\",\n  \"forward\": { \"text\": true, \"image\": true, \"document\": true, \"other\": false },\n  \"defaults\": { \"requirePrefixForAll\": true, \"groupMode\": \"prefix\", \"groupPrefix\": \"!bot\" }\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/admin/automations", "host": ["{{baseUrl}}"], "path": ["admin", "automations"] }
+          }
+        },
+        {
+          "name": "Automations - Patch rule for chat",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "x-admin-key", "value": "{{adminKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"enabled\": true,\n  \"groupMode\": \"prefix\",\n  \"groupPrefix\": \"!bot\",\n  \"quietHours\": { \"enabled\": true, \"start\": \"22:00\", \"end\": \"06:00\", \"tz\": \"Africa/Johannesburg\" }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/admin/automations/chat/{{groupJid}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "automations", "chat", "{{groupJid}}"]
+            }
+          }
+        },
+        {
+          "name": "Automations - Delete rule for chat",
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "x-admin-key", "value": "{{adminKey}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/admin/automations/chat/{{groupJid}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "automations", "chat", "{{groupJid}}"]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
