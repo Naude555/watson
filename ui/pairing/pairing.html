@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Watson Pairing</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root{
+      --bg:#0b0b10;
+      --card:#12121a;
+      --border:rgba(255,255,255,.08);
+      --text:rgba(255,255,255,.92);
+      --muted:rgba(255,255,255,.62);
+      --yellow:#ffd000;
+      --purple:#8a2be2;
+      --purple2:#b14cff;
+      --shadow:0 10px 30px rgba(0,0,0,.45);
+      --radius:18px;
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
+      color:var(--text);
+      background:
+        radial-gradient(1200px 600px at 20% 0%, rgba(138,43,226,.22), transparent 60%),
+        radial-gradient(1000px 500px at 80% 10%, rgba(255,208,0,.12), transparent 55%),
+        linear-gradient(180deg, var(--bg), #07070b 70%);
+      min-height:100vh;
+      padding:28px 16px;
+    }
+    .wrap{max-width:980px;margin:0 auto}
+    .top{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:16px}
+    .brand{display:flex;align-items:center;gap:12px}
+    .logo{
+      width:44px;height:44px;border-radius:14px;
+      background: linear-gradient(135deg, rgba(255,208,0,.22), rgba(138,43,226,.24));
+      border:1px solid var(--border);
+      box-shadow: var(--shadow);
+      position:relative; overflow:hidden;
+    }
+    .logo:before{
+      content:""; position:absolute; inset:-40%;
+      background: conic-gradient(from 210deg, rgba(255,208,0,.0), rgba(255,208,0,.55), rgba(138,43,226,.75), rgba(255,208,0,.0));
+      animation: spin 5s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    h1{font-size:20px;margin:0;letter-spacing:.2px}
+    .subtitle{margin:2px 0 0;color:var(--muted);font-size:13px}
+
+    .pill{
+      display:inline-flex;align-items:center;gap:8px;
+      padding:8px 12px;border-radius:999px;
+      border:1px solid var(--border);
+      background:rgba(255,255,255,.04);
+      color:var(--muted);
+      font-size:13px;
+    }
+    .dot{width:10px;height:10px;border-radius:50%;}
+    .dot.open{background:#29d17c;box-shadow:0 0 0 6px rgba(41,209,124,.12);}
+    .dot.connecting{background:var(--yellow);box-shadow:0 0 0 6px rgba(255,208,0,.12);}
+    .dot.disconnected{background:#ff4d6d;box-shadow:0 0 0 6px rgba(255,77,109,.12);}
+
+    .grid{display:grid;grid-template-columns:1.1fr .9fr;gap:16px;margin-top:12px}
+    @media (max-width:860px){.grid{grid-template-columns:1fr}}
+
+    .card{
+      border:1px solid var(--border);
+      background: linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,.02));
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding:18px;
+      position:relative;
+      overflow:hidden;
+    }
+    .card:after{
+      content:""; position:absolute; inset:0;
+      background:
+        radial-gradient(700px 250px at 20% 0%, rgba(138,43,226,.18), transparent 60%),
+        radial-gradient(600px 260px at 80% 0%, rgba(255,208,0,.10), transparent 55%);
+      pointer-events:none;
+    }
+    .card>*{position:relative;z-index:1}
+
+    .hint{color:var(--muted);font-size:14px;line-height:1.45;margin:8px 0 0}
+    .btnrow{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}
+
+    button{
+      appearance:none;
+      border:1px solid var(--border);
+      background: rgba(255,255,255,.06);
+      color: var(--text);
+      padding:10px 12px;border-radius:14px;
+      font-weight:600;
+      cursor:pointer;
+      transition: transform .06s ease, background .15s ease, border-color .15s ease;
+    }
+    button:hover{background: rgba(255,255,255,.10);border-color: rgba(255,255,255,.14)}
+    button:active{transform: scale(.98)}
+    .btnPrimary{
+      border:1px solid rgba(138,43,226,.55);
+      background: linear-gradient(135deg, rgba(138,43,226,.35), rgba(177,76,255,.18));
+    }
+    .btnPrimary:hover{
+      border-color: rgba(255,208,0,.45);
+      background: linear-gradient(135deg, rgba(255,208,0,.18), rgba(138,43,226,.28));
+    }
+
+    .qrBox{display:flex;flex-direction:column;align-items:center;gap:12px}
+    .qr{
+      width:360px;height:360px;max-width:100%;
+      border-radius: 22px;
+      border: 1px solid var(--border);
+      background: rgba(0,0,0,.35);
+      display:grid;place-items:center;
+      overflow:hidden;
+    }
+    .qr img{width:360px;height:360px;max-width:100%;display:block}
+    .qrEmpty{color: var(--muted);font-size:14px;padding:26px;text-align:center}
+    .small{font-size:12px;color:var(--muted)}
+    code{
+      background: rgba(255,255,255,.06);
+      border: 1px solid var(--border);
+      padding: 2px 7px;
+      border-radius: 10px;
+      color: rgba(255,255,255,.85);
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div class="brand">
+        <div class="logo" aria-hidden="true">
+          <img src="/admin/assets/watson.svg" alt="WA" style="width:24px;height:24px;position:absolute;top:10px;left:10px;filter:drop-shadow(0 0 2px rgba(255,255,255,.3))"/>
+        </div>
+        <div>
+          <h1>Watson Device Pairing</h1>
+          <div class="subtitle">SSE live updates</div>
+        </div>
+      </div>
+      <div class="pill">
+        <span class="dot disconnected" id="dot"></span>
+        <span id="statusText">unknown</span>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <div style="font-weight:800;font-size:16px">Status</div>
+        <div class="hint" id="hint">Connecting…</div>
+        <div class="btnrow">
+          <button class="btnPrimary" onclick="refreshQr()">Refresh QR</button>
+          <button onclick="help()">Help / Troubleshoot</button>
+        </div>
+        <div class="hint" style="margin-top:14px">
+          WhatsApp → <em>Linked devices</em> → <em>Link a device</em> → scan the QR.
+        </div>
+        <div class="hint">
+          Force a new QR: stop service, delete <code>./auth</code>, start again.
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="qrBox">
+          <div class="qr">
+            <div class="qrEmpty" id="qrEmpty">Waiting for QR…</div>
+            <img id="qrImg" src="" alt="WhatsApp QR" style="display:none"/>
+          </div>
+          <div class="small" id="meta"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+  const statusEl=document.getElementById('statusText');
+  const hintEl=document.getElementById('hint');
+  const dotEl=document.getElementById('dot');
+  const imgEl=document.getElementById('qrImg');
+  const emptyEl=document.getElementById('qrEmpty');
+  const metaEl=document.getElementById('meta');
+
+  function setDot(status){
+    dotEl.className='dot ' + (status||'disconnected');
+  }
+  function showQr(show){
+    if(show){
+      emptyEl.style.display='none';
+      imgEl.style.display='block';
+    }else{
+      emptyEl.style.display='block';
+      imgEl.style.display='none';
+      imgEl.src='';
+    }
+  }
+  function setStatus(status, hasQR){
+    statusEl.textContent=status;
+    setDot(status);
+    metaEl.textContent='Updated: ' + new Date().toLocaleString();
+
+    if(status==='open'){
+      hintEl.textContent='Connected ✅ (No QR needed)';
+      showQr(false);
+      return;
+    }
+    if(hasQR){
+      hintEl.textContent='Scan the QR in WhatsApp → Linked devices';
+      imgEl.src='/pairing/qr.png?t='+Date.now();
+      showQr(true);
+    }else{
+      hintEl.textContent='Waiting for QR…';
+      showQr(false);
+    }
+  }
+  function refreshQr(){
+    imgEl.src='/pairing/qr.png?t='+Date.now();
+    showQr(true);
+  }
+  function help(){
+    alert(
+      "If QR doesn't appear:\\n" +
+      "1) If already connected, QR won't show\\n" +
+      "2) To force QR: stop, delete ./auth, start again\\n" +
+      "3) Ensure Nginx is not buffering /pairing/stream"
+    );
+  }
+
+  (function(){
+    const es=new EventSource('/pairing/stream');
+    es.addEventListener('status',(e)=>{ try{ const d=JSON.parse(e.data); setStatus(d.status,d.hasQR);}catch(_){} });
+    es.addEventListener('qr',()=>{ imgEl.src='/pairing/qr.png?t='+Date.now(); showQr(true); });
+    es.addEventListener('ping',()=>{});
+    es.onerror=()=>{ hintEl.textContent='Stream disconnected. Check Nginx SSE config.'; setDot('disconnected'); };
+  })();
+</script>
+</body>
+</html>

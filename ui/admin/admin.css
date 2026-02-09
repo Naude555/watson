@@ -1,0 +1,530 @@
+
+:root{
+    --bg:#0b0b10;
+    --card:#12121a;
+    --border:rgba(255,255,255,.10);
+    --border2:rgba(255,255,255,.14);
+    --text:rgba(255,255,255,.92);
+    --muted:rgba(255,255,255,.62);
+    --yellow:#ffd000;
+    --purple:#8a2be2;
+    --purple2:#b14cff;
+    --danger:#ff4d6d;
+    --ok:#29d17c;
+    --shadow:0 14px 40px rgba(0,0,0,.45);
+    --radius:18px;
+    --radius2:14px;
+}
+*{box-sizing:border-box}
+body{
+    margin:0;
+    font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
+    color:var(--text);
+    background:
+    radial-gradient(1200px 600px at 20% 0%, rgba(138,43,226,.22), transparent 60%),
+    radial-gradient(1000px 500px at 80% 10%, rgba(255,208,0,.12), transparent 55%),
+    linear-gradient(180deg, var(--bg), #07070b 70%);
+    min-height:100vh;
+    padding:24px 14px 40px;
+}
+.wrap{max-width:1320px;margin:0 auto}
+.top{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:14px;flex-wrap:wrap}
+.brand{display:flex;align-items:center;gap:12px}
+.logo{
+    width:44px;height:44px;border-radius:14px;
+    background: linear-gradient(135deg, rgba(255,208,0,.22), rgba(138,43,226,.24));
+    border:1px solid var(--border);
+    box-shadow: var(--shadow);
+    position:relative; overflow:hidden;
+}
+.logo:before{
+    content:""; position:absolute; inset:-40%;
+    background: conic-gradient(from 210deg, rgba(255,208,0,.0), rgba(255,208,0,.55), rgba(138,43,226,.75), rgba(255,208,0,.0));
+    animation: spin 6s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+h1{font-size:20px;margin:0;letter-spacing:.2px}
+.subtitle{margin:2px 0 0;color:var(--muted);font-size:13px}
+
+.pill{
+    display:inline-flex;align-items:center;gap:8px;
+    padding:8px 12px;border-radius:999px;
+    border:1px solid var(--border);
+    background:rgba(255,255,255,.04);
+    color:var(--muted);
+    font-size:13px;
+    user-select:none;
+}
+.dot{width:10px;height:10px;border-radius:50%;}
+.dot.ok{background:var(--ok);box-shadow:0 0 0 6px rgba(41,209,124,.12);}
+.dot.err{background:var(--danger);box-shadow:0 0 0 6px rgba(255,77,109,.12);}
+.dot.neutral{background:var(--yellow);box-shadow:0 0 0 6px rgba(255,208,0,.12);}
+
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media(max-width: 980px){ .grid{grid-template-columns:1fr} }
+
+.card{
+    border:1px solid var(--border);
+    background: linear-gradient(180deg, rgba(255,255,255,.05), rgba(255,255,255,.02));
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding:16px;
+    position:relative;
+    overflow:hidden;
+}
+.card:after{
+    content:""; position:absolute; inset:0;
+    background:
+    radial-gradient(700px 250px at 20% 0%, rgba(138,43,226,.16), transparent 60%),
+    radial-gradient(600px 260px at 80% 0%, rgba(255,208,0,.10), transparent 55%);
+    pointer-events:none;
+}
+.card>*{position:relative;z-index:1}
+
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.row > * {flex: none}
+.grow{flex:1;min-width:220px}
+.grow2{flex:2;min-width:240px}
+.grow3{flex:3;min-width:280px}
+
+label{font-size:12px;color:var(--muted)}
+.muted{color:var(--muted)}
+.small{font-size:12px;color:var(--muted)}
+.kpi{font-size:12px;color:rgba(255,255,255,.70)}
+code{
+    background: rgba(255,255,255,.06);
+    border: 1px solid var(--border);
+    padding: 2px 7px;
+    border-radius: 10px;
+    color: rgba(255,255,255,.86);
+}
+
+input,select,textarea{
+    width:100%;
+    padding:10px 12px;
+    border-radius: 14px;
+    border: 1px solid var(--border);
+    background: rgba(0,0,0,.30);
+    color: var(--text);
+    outline: none;
+}
+input:focus,select:focus,textarea:focus{border-color: rgba(255,208,0,.35); box-shadow: 0 0 0 4px rgba(255,208,0,.10)}
+textarea{min-height:110px;resize:vertical}
+
+button{
+    appearance:none;
+    border:1px solid var(--border);
+    background: rgba(255,255,255,.06);
+    color: var(--text);
+    padding:10px 12px;border-radius:14px;
+    font-weight:700;
+    cursor:pointer;
+    transition: transform .06s ease, background .15s ease, border-color .15s ease;
+    user-select:none;
+    white-space:nowrap;
+}
+button:hover{background: rgba(255,255,255,.10);border-color: var(--border2)}
+button:active{transform: scale(.98)}
+.btnPrimary{
+    border:1px solid rgba(138,43,226,.55);
+    background: linear-gradient(135deg, rgba(138,43,226,.35), rgba(177,76,255,.18));
+}
+.btnPrimary:hover{
+    border-color: rgba(255,208,0,.45);
+    background: linear-gradient(135deg, rgba(255,208,0,.18), rgba(138,43,226,.28));
+}
+.btnDanger{
+    border:1px solid rgba(255,77,109,.45);
+    background: rgba(255,77,109,.10);
+}
+.btnGhost{
+    background: rgba(255,255,255,.03);
+}
+
+.tabs{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.tab{
+    padding:8px 12px;
+    border:1px solid var(--border);
+    border-radius:999px;
+    background: rgba(255,255,255,.03);
+    cursor:pointer;
+    user-select:none;
+    font-weight:700;
+    color: rgba(255,255,255,.78);
+}
+.tab.active{
+    border-color: rgba(255,208,0,.35);
+    background: linear-gradient(135deg, rgba(255,208,0,.12), rgba(138,43,226,.16));
+    color: rgba(255,255,255,.92);
+}
+.hidden{display:none}
+
+table{width:100%;border-collapse:collapse}
+th,td{border-bottom:1px solid rgba(255,255,255,.08);padding:10px;text-align:left;vertical-align:top}
+th{color: rgba(255,255,255,.72);font-size:12px;text-transform:uppercase;letter-spacing:.08em}
+
+#chatLog{
+    height:430px;overflow:auto;
+    border:1px solid rgba(255,255,255,.08);
+    border-radius: 18px;
+    padding:10px;
+    background: rgba(0,0,0,.25);
+    white-space:pre-wrap;
+}
+.msg{
+    padding:10px 12px;border-radius:16px;margin:8px 0;
+    background: rgba(255,255,255,.05);
+    border:1px solid rgba(255,255,255,.08);
+}
+.meta{font-size:12px;color:rgba(255,255,255,.65);margin-bottom:6px}
+.toast{
+    margin-top:10px;
+    padding:10px 12px;
+    border-radius: 14px;
+    border:1px solid var(--border);
+    background: rgba(255,255,255,.03);
+}
+.toast.ok{border-color: rgba(41,209,124,.35); background: rgba(41,209,124,.07)}
+.toast.err{border-color: rgba(255,77,109,.35); background: rgba(255,77,109,.08)}
+.msg.in { border-left: 3px solid rgba(255,208,0,.35); }
+.msg.out { border-left: 3px solid rgba(138,43,226,.45); }
+
+.badge{
+  display:inline-flex;
+  align-items:center;
+  padding:2px 8px;
+  border-radius:999px;
+  border:1px solid rgba(255,255,255,.10);
+  background: rgba(255,255,255,.04);
+  font-size:12px;
+  color: rgba(255,255,255,.80);
+}
+
+.badge.type{
+  border-color: rgba(255,208,0,.22);
+  background: rgba(255,208,0,.08);
+}
+
+.badge.queued{
+  border-color: rgba(255,208,0,.22);
+  background: rgba(255,208,0,.08);
+}
+.badge.sent{
+  border-color: rgba(41,209,124,.25);
+  background: rgba(41,209,124,.08);
+}
+.badge.failed{
+  border-color: rgba(255,77,109,.25);
+  background: rgba(255,77,109,.10);
+}
+
+.bodyText{ margin-top:2px; }
+
+.mediaWrap{ margin-top:10px; }
+
+.mediaImg{
+  max-width: 260px;
+  width: 100%;
+  height: auto;
+  border-radius: 14px;
+  border: 1px solid rgba(255,255,255,.10);
+  background: rgba(0,0,0,.25);
+  display:block;
+}
+
+.mediaLink{
+  display:inline-flex;
+  gap:8px;
+  align-items:center;
+  padding:8px 10px;
+  border-radius: 14px;
+  border: 1px solid rgba(255,255,255,.10);
+  background: rgba(0,0,0,.20);
+  color: rgba(255,255,255,.88);
+  text-decoration:none;
+}
+
+/* ---------- Send: checkbox multi-select ---------- */
+.selectedBox{
+  border:1px solid var(--border);
+  background:rgba(255,255,255,.03);
+  border-radius:var(--radius2);
+  padding:10px 12px;
+}
+.targetList{
+  border:1px solid var(--border);
+  background:rgba(255,255,255,.02);
+  border-radius:var(--radius2);
+  max-height:260px;
+  overflow:auto;
+}
+.targetRow{
+  display:flex;
+  gap:10px;
+  align-items:flex-start;
+  padding:10px 12px;
+  border-bottom:1px solid rgba(255,255,255,.06);
+  cursor:pointer;
+}
+.targetRow:last-child{border-bottom:none}
+.targetRow:hover{background:rgba(255,255,255,.03)}
+.targetRow input[type="checkbox"]{margin-top:3px; width:16px; height:16px;}
+.targetText .tMain{font-weight:800; font-size:13px;}
+.targetText .tSub{font-size:12px;color:var(--muted);margin-top:2px;word-break:break-all;}
+
+.chips{display:flex;flex-wrap:wrap;gap:8px;}
+.chip{
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+  padding:6px 10px;
+  border-radius:999px;
+  border:1px solid rgba(255,255,255,.12);
+  background:rgba(255,255,255,.04);
+  max-width:100%;
+}
+.chipText{font-size:12px;color:rgba(255,255,255,.90);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:460px;}
+.chipX{
+  border:none;
+  background:rgba(255,255,255,.08);
+  color:rgba(255,255,255,.85);
+  width:20px;height:20px;
+  border-radius:999px;
+  cursor:pointer;
+  line-height:18px;
+}
+.chipX:hover{background:rgba(255,255,255,.14)}
+.mediaLink:hover{
+  border-color: rgba(255,208,0,.25);
+}
+
+
+/* -------------------------
+   Chat window (WhatsApp-ish)
+   ------------------------- */
+.segTabs{display:inline-flex;gap:6px;align-items:center}
+.seg{
+  padding:6px 10px;
+  border-radius:999px;
+  border:1px solid rgba(255,255,255,.10);
+  background: rgba(255,255,255,.03);
+  color: rgba(255,255,255,.80);
+  font-weight:800;
+  cursor:pointer;
+}
+.seg.active{
+  border-color: rgba(255,208,0,.35);
+  background: linear-gradient(135deg, rgba(255,208,0,.10), rgba(138,43,226,.10));
+  color: rgba(255,255,255,.92);
+}
+
+.chatWindow{
+  margin-top:10px;
+  height:520px; /* fixed window: doesn't grow with new chats */
+  display:flex;
+  flex-direction:column;
+  border:1px solid rgba(255,255,255,.08);
+  border-radius: 18px;
+  background: rgba(0,0,0,.25);
+  overflow:hidden;
+}
+
+/* Override legacy #chatLog sizing */
+#chatLog{
+  height:auto;
+  overflow:auto;
+  border:none;
+  border-radius:0;
+  padding:10px;
+  background: transparent;
+  white-space:pre-wrap;
+}
+
+.chatComposer{
+  border-top:1px solid rgba(255,255,255,.08);
+  padding:10px;
+  background: rgba(0,0,0,.20);
+}
+
+.chatComposer textarea{
+  width:100%;
+  min-height:46px;
+  resize:vertical;
+}
+
+.composerRow{
+  margin-top:8px;
+  display:flex;
+  gap:10px;
+  align-items:center;
+  justify-content:space-between;
+}
+
+/* Make bubbles feel more like chat */
+.msg{max-width:78%;}
+.msg.in{margin-right:auto;}
+.msg.out{margin-left:auto;}
+
+.msg.in{
+  background: rgba(255,208,0,.06);
+  border-color: rgba(255,208,0,.18);
+}
+.msg.out{
+  background: rgba(138,43,226,.10);
+  border-color: rgba(138,43,226,.22);
+}
+
+.grid.one{grid-template-columns:1fr;}
+
+.chatWindow{height:68vh; max-height:720px; min-height:520px;}
+
+
+/* Panel spacing */
+#panelMessages, #panelSend, #panelContacts{margin-top:14px;}
+
+
+/* ---------- Automations UI helpers ---------- */
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media(max-width: 980px){ .grid2{grid-template-columns:1fr} }
+
+.panel{
+  border:1px solid rgba(255,255,255,.08);
+  border-radius: 18px;
+  padding:14px;
+  background: rgba(0,0,0,.18);
+}
+
+.field{margin-top:12px}
+.field:first-child{margin-top:0}
+
+.listBox{
+  border:1px solid rgba(255,255,255,.10);
+  border-radius: 16px;
+  background: rgba(0,0,0,.20);
+  padding:6px;
+}
+.listItem{
+  display:flex;
+  gap:10px;
+  align-items:flex-start;
+  padding:10px 10px;
+  border-radius: 14px;
+  cursor:pointer;
+  border:1px solid transparent;
+}
+.listItem:hover{
+  background: rgba(255,255,255,.04);
+  border-color: rgba(255,255,255,.08);
+}
+.listItem.active{
+  background: rgba(255,208,0,.08);
+  border-color: rgba(255,208,0,.18);
+}
+.listItem .liMain{font-weight:700}
+.listItem .liSub{font-size:12px;color:rgba(255,255,255,.62);margin-top:2px}
+
+.codeBox{
+  margin:0;
+  padding:10px 12px;
+  border-radius: 14px;
+  border:1px solid rgba(255,255,255,.10);
+  background: rgba(0,0,0,.28);
+  overflow:auto;
+  max-height:240px;
+  font-size:12px;
+  color: rgba(255,255,255,.86);
+}
+
+.pillRow{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.pillLabel{color:rgba(255,255,255,.70);font-size:12px;min-width:58px}
+.pillChoice{
+  display:inline-flex;
+  gap:8px;
+  align-items:center;
+  padding:6px 10px;
+  border-radius:999px;
+  border:1px solid rgba(255,255,255,.10);
+  background: rgba(255,255,255,.03);
+  font-size:12px;
+  color: rgba(255,255,255,.82);
+}
+.pillChoice input{width:auto}
+
+.chip{
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+  padding:6px 10px;
+  border-radius:999px;
+  border:1px solid rgba(255,255,255,.10);
+  background: rgba(0,0,0,.18);
+  font-size:12px;
+}
+.chipX{
+  border:none;
+  background: transparent;
+  color: rgba(255,255,255,.75);
+  font-weight:900;
+  padding:0 4px;
+  cursor:pointer;
+}
+
+/* -------------------------
+   Automations: checkbox rows (refined)
+   ------------------------- */
+
+/* Turn checkbox labels into a neat two-column mini-grid: [box] [text] */
+#panelAutomations .field label.row{
+  display:grid !important;
+  grid-template-columns: 16px auto;
+  column-gap: 10px;
+  align-items:center;
+  justify-content:start;
+  width: fit-content;          /* don’t stretch full width */
+  padding: 4px 8px;
+  border-radius: 12px;
+}
+
+/* Make the checkbox consistent */
+#panelAutomations .field label.row > input[type="checkbox"]{
+  width:16px;
+  height:16px;
+  margin:0 !important;
+  accent-color: var(--yellow); /* modern browsers */
+}
+
+/* Label text */
+#panelAutomations .field label.row > span{
+  margin:0;
+  line-height:1.2;
+  color: rgba(255,255,255,.82);
+}
+
+/* Hover/active polish */
+#panelAutomations .field label.row:hover{
+  background: rgba(255,255,255,.03);
+  border: 1px solid rgba(255,255,255,.06);
+}
+
+/* When disabled (inherit mode), keep it visually clear */
+#panelAutomations #overrideFields [disabled]{
+  opacity: .55;
+  cursor: not-allowed;
+}
+
+/* Make the Safety section look like a neat row */
+#panelAutomations .field .safetyGrid{
+  display:flex;
+  gap:10px;
+  flex-wrap:wrap;
+  margin-top:6px;
+}
+
+
+#panelAutomations .field label.row{
+  border:1px solid rgba(255,255,255,.08);
+  background: rgba(0,0,0,.12);
+}
+#panelAutomations .field label.row:hover{
+  border-color: rgba(255,208,0,.16);
+}

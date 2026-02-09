@@ -1,0 +1,459 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>WA Admin</title>
+<link rel="stylesheet" href="/admin/assets/admin.css">
+
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div class="brand">
+      <div class="logo" aria-hidden="true">
+        <img src="/admin/assets/watson.svg" alt="WA" style="width:24px;height:24px;position:absolute;top:10px;left:10px;filter:drop-shadow(0 0 2px rgba(255,255,255,.3))"/>
+      </div>
+      <div>
+        <h1>Watson Admin</h1>
+        <div class="subtitle">Ops console • Contacts & aliases • Multi-send</div>
+      </div>
+    </div>
+    <div class="pill">
+      <span class="dot neutral" id="statusDot"></span>
+      <span id="statusText">not connected</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <div class="grow2">
+        <label>Admin Key</label>
+        <input id="adminKey" placeholder="paste WA_ADMIN_KEY here"/>
+      </div>
+      <div class="row" style="align-items:flex-end">
+        <button class="btnPrimary" onclick="boot()">Connect</button>
+        <button class="btnGhost" onclick="saveKey()">Remember</button>
+        <button class="btnDanger" onclick="clearKey()">Clear</button>
+      </div>
+    </div>
+
+    <div class="tabs">
+      <div class="tab active" id="tabMessages" onclick="showTab('messages')">Messages</div>
+      <div class="tab" id="tabSend" onclick="showTab('send')">Send Messages</div>
+      <div class="tab" id="tabContacts" onclick="showTab('contacts')">Contacts & Aliases</div>
+      <div class="tab" id="tabAutomations" onclick="showTab('automations')">Automations</div>
+    </div>
+
+    <div id="status" class="toast" style="margin-top:10px;">Enter admin key → Connect</div>
+  </div>
+
+  
+  <!-- MESSAGES -->
+  <div id="panelMessages">
+    <div class="grid one">
+<div class="card">
+        <div class="row" style="justify-content:space-between">
+          <div>
+            <div style="font-weight:900;font-size:16px">Messages</div>
+            <div class="small">Grouped by chat. Pick a chat to view messages.</div>
+          </div>
+          <div class="row">
+            <button class="btnGhost" onclick="loadChats()">Refresh Chats</button>
+          </div>
+        </div>
+
+        <div class="row" style="margin-top:10px">
+          <input id="chatSearch" class="grow2" placeholder="Search chats…" oninput="renderChats()"/>
+          <select id="chatSelect" class="grow3" onchange="selectChat()"></select>
+        </div>
+
+        <div class="row" style="margin-top:8px">
+          <div class="small">Auto refresh:</div>
+          <select id="pollRate" style="max-width:120px" onchange="restartPolling()">
+            <option value="0">off</option>
+            <option value="2000">2s</option>
+            <option value="5000" selected>5s</option>
+            <option value="10000">10s</option>
+          </select>
+          <div class="small" id="chatMeta"></div>
+        </div>
+
+        <div class="chatControls" style="margin-top:10px">
+          <div class="segTabs">
+            <button class="seg active" id="msgTabAll" onclick="setMsgFilter('all')">All</button>
+            <button class="seg" id="msgTabIn" onclick="setMsgFilter('in')">Incoming</button>
+            <button class="seg" id="msgTabOut" onclick="setMsgFilter('out')">Outgoing</button>
+          </div>
+          <div class="small" id="msgFilterHint">Showing: All</div>
+        </div>
+
+        <div id="chatWindow" class="chatWindow">
+          <div id="chatLog" class="chatLog"></div>
+
+          <div class="chatComposer">
+            <textarea id="replyText" placeholder="Reply to this chat… (Enter to send, Shift+Enter for newline)" rows="2"></textarea>
+            <div class="composerRow">
+              <div class="small" id="replyToHint">No chat selected</div>
+              <button class="btnPrimary" onclick="sendReply()">Send</button>
+            </div>
+            <div class="composerRow" style="margin-top:8px">
+              <input id="replyFile" type="file" class="grow3"/>
+              <input id="replyCaption" class="grow2" placeholder="Caption (optional for images)"/>
+              <button class="btnGhost" onclick="clearReplyMedia()">Clear</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SEND -->
+  <div id="panelSend" class="hidden">
+    <div class="grid one">
+<div class="card">
+        <div class="row" style="justify-content:space-between">
+          <div>
+            <div style="font-weight:900;font-size:16px">Send</div>
+            <div class="small">Send to one or multiple targets. Manual To supports comma/newline list.</div>
+          </div>
+          <div class="row">
+            <button class="btnGhost" onclick="loadTargets()">Refresh Targets</button>
+          </div>
+        </div>
+
+        <div class="row" style="margin-top:10px">
+          <input id="targetSearch" class="grow2" placeholder="Search targets…" oninput="renderTargets()"/>
+        </div>
+
+        <div class="selectedBox" id="selectedTargetsBox" style="margin-top:10px">
+          <div class="small" style="opacity:.9">Selected targets will be used if Manual To is empty.</div>
+          <div id="selectedTargetsChips" class="chips" style="margin-top:8px"></div>
+        </div>
+
+        <div id="targetList" class="targetList" style="margin-top:10px"></div>
+
+        <div class="row" style="margin-top:10px">
+          <input id="toManual" class="grow3" placeholder="Manual To: name / alias / 082... / +27... / jid (comma or newline separated)"/>
+          <button class="btnGhost" onclick="useSelectedAsManual()">Use Selected</button>
+          <button class="btnDanger" onclick="clearManual()">Clear</button>
+        </div>
+
+        <div class="small" style="margin-top:8px">
+          Sending uses <strong>Manual To</strong> if filled, otherwise the multi-select list.
+          Phone example: <code>0821234567</code>. JID example: <code>1203...@g.us</code>.
+        </div>
+
+        <div class="row" style="margin-top:10px">
+          <select id="sendType" style="max-width:260px" onchange="renderSendForm()">
+            <option value="text" selected>Text</option>
+            <option value="image_upload">Image (Upload)</option>
+            <option value="image_url">Image (URL)</option>
+            <option value="doc_upload">Document (Upload)</option>
+            <option value="doc_url">Document (URL)</option>
+          </select>
+          <button class="btnPrimary" onclick="sendNow()">Send</button>
+        </div>
+
+        <div id="sendForm" style="margin-top:10px"></div>
+
+        <div class="small" style="margin-top:10px">
+          After sending, the Messages panel will switch to the first resolved chat.
+        </div>
+      </div>
+
+    </div>
+  </div>
+    </div>
+  </div>
+
+<!-- CRUD -->
+  <div id="panelContacts" class="hidden">
+    <div class="grid">
+
+      <div class="card">
+        <div style="font-weight:900;font-size:16px;margin-bottom:6px">Contacts (by Name)</div>
+        <div class="small">Send to people by name. If you provide SA MSISDN like <code>082…</code>, the server converts to +27 format.</div>
+
+        <div class="row" style="margin-top:10px">
+          <input id="cName" class="grow" placeholder="Name (e.g. Oppies)"/>
+          <input id="cMsisdn" class="grow" placeholder="MSISDN (e.g. 082…)"/>
+          <input id="cJid" class="grow2" placeholder="JID optional (e.g. 2782…@s.whatsapp.net)"/>
+          <input id="cTags" class="grow" placeholder="Tags (comma separated)"/>
+          <button class="btnPrimary" onclick="upsertContact()">Save</button>
+        </div>
+
+        <div style="margin-top:12px;overflow:auto">
+          <table id="contactsTable">
+            <thead><tr><th>Name</th><th>MSISDN</th><th>JID</th><th>Tags</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <div style="font-weight:900;font-size:16px;margin-bottom:6px">Group Aliases</div>
+        <div class="small">Alias lets you send reliably without relying on WhatsApp subject matching.</div>
+
+        <div class="row" style="margin-top:10px">
+          <input id="gName" class="grow" placeholder="Alias name (e.g. Ops Team)"/>
+          <input id="gJid" class="grow3" placeholder="Group JID (ends with @g.us)"/>
+          <button class="btnPrimary" onclick="upsertGroup()">Save</button>
+        </div>
+
+        <div class="row" style="margin-top:10px">
+          <button class="btnGhost" onclick="copyFromWaGroups()">Pick from WhatsApp Group Cache →</button>
+          <select id="waGroupsPick" class="grow3"></select>
+        </div>
+
+        <div style="margin-top:12px;overflow:auto">
+          <table id="groupsTable">
+            <thead><tr><th>Alias</th><th>Group JID</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Automations -->
+  <div id="panelAutomations" class="hidden">
+    <div class="card">
+      <div class="row" style="justify-content:space-between;align-items:flex-start;gap:12px">
+        <div>
+          <div style="font-weight:900;font-size:16px">Automation Rules → n8n Forwarding</div>
+          <div class="small">This config only decides what gets forwarded. n8n handles the flow logic.</div>
+        </div>
+        <div class="row" style="align-items:flex-end">
+          <button class="btnGhost" type="button" id="btnAutoReload">Reload</button>
+          <button class="btnPrimary" type="button" id="btnAutoSaveGlobal">Save</button>
+        </div>
+      </div>
+
+      <div class="grid2" style="margin-top:12px">
+        <div class="panel">
+          <div style="font-weight:800;margin-bottom:6px">Global</div>
+
+          <label class="row"><input type="checkbox" id="autoEnabled"> <span><b>Enable automations</b></span></label>
+
+          <div class="field">
+            <label>n8n Webhook (read-only)</label>
+            <div class="row">
+              <input id="autoWebhookUrl" type="text" readonly placeholder="(configured on server)" />
+              <button class="btnGhost" type="button" id="btnCopyWebhook">Copy</button>
+            </div>
+          </div>
+
+          <div class="field">
+            <label>Catch response when not forwarded</label>
+            <label class="row"><input type="checkbox" id="autoCatchEnabled"> <span>Reply when group is not active (use carefully)</span></label>
+            <textarea id="autoCatchText" rows="2" placeholder="Sorry, automation is not active in this group."></textarea>
+          </div>
+
+          <div class="field">
+            <label>Defaults</label>
+            <div class="pillRow">
+              <span class="pillLabel">DM:</span>
+              <label class="pillChoice"><input type="radio" name="dmMode" value="on" checked> On</label>
+              <label class="pillChoice"><input type="radio" name="dmMode" value="off"> Off</label>
+            </div>
+
+            <div class="pillRow" style="margin-top:8px">
+              <span class="pillLabel">Groups:</span>
+              <label class="pillChoice"><input type="radio" name="groupModeDefault" value="off"> Off</label>
+              <label class="pillChoice"><input type="radio" name="groupModeDefault" value="prefix" checked> Prefix only</label>
+              <label class="pillChoice"><input type="radio" name="groupModeDefault" value="keywords"> Keywords only</label>
+              <label class="pillChoice"><input type="radio" name="groupModeDefault" value="all"> All</label>
+            </div>
+
+            <div id="globalPrefixRow" style="margin-top:10px">
+              <label>Prefix</label>
+              <input id="globalPrefix" type="text" value="!bot" />
+              <div class="small">In groups: “!bot help” → keyword = “help”.</div>
+            </div>
+
+            <div id="globalKeywordsRow" class="hidden" style="margin-top:10px">
+              <label>Keywords (one per line)</label>
+              <textarea id="globalKeywords" rows="4" placeholder="help&#10;support&#10;quote"></textarea>
+            </div>
+          </div>
+
+          <div class="field">
+            <label>Safety</label>
+            <div class="safetyGrid">
+                <label class="row"><input type="checkbox" id="globalAllowDM" checked> <span>Allow DMs</span></label>
+                <label class="row"><input type="checkbox" id="globalAllowGroups" checked> <span>Allow groups</span></label>
+                <label class="row"><input type="checkbox" id="globalBlockMedia" checked> <span>Block media forwarding</span></label>
+            </div>
+          </div>
+
+
+          <div class="field">
+            <label>Rate limit</label>
+            <label class="row"><input type="checkbox" id="globalRateEnabled" checked> <span>Enable rate limit</span></label>
+            <div class="row">
+              <input id="globalRateMaxPerMinute" type="number" min="1" value="12" style="max-width:140px">
+              <span class="small">messages per minute per chat</span>
+            </div>
+          </div>
+
+          <div class="field">
+            <label>Quiet hours</label>
+            <label class="row"><input type="checkbox" id="globalQuietEnabled"> <span>Enable quiet hours</span></label>
+            <div class="row">
+              <input id="globalQuietStart" type="time" value="20:00">
+              <input id="globalQuietEnd" type="time" value="06:00">
+              <input id="globalQuietTz" type="text" value="Africa/Johannesburg" style="max-width:220px">
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="row" style="justify-content:space-between;align-items:flex-end">
+            <div>
+              <div style="font-weight:800;margin-bottom:2px">Overrides</div>
+              <div class="small">Pick a chat/group and override the forwarding rules.</div>
+            </div>
+            <div class="row">
+              <button class="btnDanger" type="button" id="btnAutoResetOverride" disabled>Reset</button>
+              <button class="btnPrimary" type="button" id="btnAutoSaveOverride" disabled>Save override</button>
+            </div>
+          </div>
+
+          <div class="row" style="margin-top:10px">
+            <input id="autoChatSearch" class="grow2" placeholder="Search chats / groups…" />
+            <button class="btnGhost" type="button" id="btnAutoChatRefresh">Refresh</button>
+          </div>
+
+          <div id="autoChatList" class="listBox" style="margin-top:10px;max-height:260px;overflow:auto"></div>
+
+          <div class="field" style="margin-top:12px">
+            <label>Selected</label>
+            <div class="row">
+              <div class="grow3">
+                <div id="autoSelTitle" style="font-weight:700">None</div>
+                <div id="autoSelJid" class="small"></div>
+              </div>
+              <span id="autoSelState" class="badge type">No selection</span>
+            </div>
+          </div>
+
+          <div class="field" style="margin-top:12px">
+            <label>Effective rule preview</label>
+
+            <div class="row" style="gap:8px;align-items:flex-end">
+                <div class="grow3">
+                <div class="small">Sample message (for group checks)</div>
+                <input id="autoPreviewSample" placeholder="!bot help" value="!bot help" />
+                </div>
+                <button class="btnGhost" type="button" id="btnAutoPreviewRecalc">Recheck</button>
+            </div>
+
+            <div id="autoPreviewBox" class="panel" style="margin-top:10px">
+                <div class="row" style="justify-content:space-between">
+                <div><b id="autoPreviewDecision">No selection</b></div>
+                <span id="autoPreviewBadge" class="badge type">—</span>
+                </div>
+                <div id="autoPreviewReason" class="small" style="margin-top:6px;opacity:.9"></div>
+                <div id="autoPreviewEffective" class="small" style="margin-top:6px;opacity:.85"></div>
+            </div>
+            </div>
+
+            <div class="field">
+            <label>Override mode</label>
+            <div class="inlineRadios">
+                <label class="row"><input type="radio" name="overrideMode" value="inherit" checked> <span>Inherit global settings</span></label>
+                <label class="row"><input type="radio" name="overrideMode" value="custom"> <span>Custom rules for this chat</span></label>
+            </div>
+            </div>
+
+          <div id="overrideFields" class="hidden">
+            <div class="field">
+              <label class="row"><input type="checkbox" id="overrideEnabled" checked> <span><b>Enable forwarding for this chat</b></span></label>
+            </div>
+
+            <div class="field">
+              <label>Group mode (if group)</label>
+              <div class="pillRow">
+                <label class="pillChoice"><input type="radio" name="groupModeOverride" value="off"> Off</label>
+                <label class="pillChoice"><input type="radio" name="groupModeOverride" value="prefix" checked> Prefix only</label>
+                <label class="pillChoice"><input type="radio" name="groupModeOverride" value="keywords"> Keywords only</label>
+                <label class="pillChoice"><input type="radio" name="groupModeOverride" value="all"> All</label>
+              </div>
+
+              <div id="overridePrefixRow" style="margin-top:10px">
+                <label>Prefix</label>
+                <input id="overridePrefix" type="text" value="!bot" />
+                <div class="small">Keyword = first word after prefix. Example: “!bot help”.</div>
+              </div>
+
+              <div id="overrideKeywordsRow" class="hidden" style="margin-top:10px">
+                <label>Keywords (one per line)</label>
+                <textarea id="overrideKeywords" rows="4" placeholder="help&#10;support&#10;quote"></textarea>
+              </div>
+            </div>
+
+            <div class="field">
+              <label>Safety</label>
+              <div class="safetyGrid">
+                <label class="row"><input type="checkbox" id="overrideAllowDM" checked> <span>Allow DMs</span></label>
+                <label class="row"><input type="checkbox" id="overrideAllowGroups" checked> <span>Allow groups</span></label>
+                <label class="row"><input type="checkbox" id="overrideBlockMedia" checked> <span>Block media forwarding</span></label>
+              </div>
+            </div>
+
+            <div class="field">
+              <label>Rate limit</label>
+              <label class="row"><input type="checkbox" id="overrideRateEnabled" checked> <span>Enable rate limit</span></label>
+              <div class="row">
+                <input id="overrideRateMaxPerMinute" type="number" min="1" value="12" style="max-width:140px">
+                <span class="small">messages per minute</span>
+              </div>
+            </div>
+
+            <div class="field">
+              <label>Quiet hours</label>
+              <label class="row"><input type="checkbox" id="overrideQuietEnabled"> <span>Enable quiet hours</span></label>
+              <div class="row">
+                <input id="overrideQuietStart" type="time" value="20:00">
+                <input id="overrideQuietEnd" type="time" value="06:00">
+                <input id="overrideQuietTz" type="text" value="Africa/Johannesburg" style="max-width:220px">
+              </div>
+            </div>
+
+            <div class="field">
+              <label>Templates (metadata for n8n)</label>
+              <div class="row" style="margin-top:6px">
+                <input id="tplKey" placeholder="key (e.g. helpMenu)" style="max-width:220px">
+                <input id="tplVal" placeholder="template text…" class="grow3">
+                <button class="btnGhost" type="button" id="btnTplAdd">Add</button>
+              </div>
+              <div id="tplList" class="listBox" style="margin-top:10px;max-height:160px;overflow:auto"></div>
+            </div>
+
+            <div class="field">
+              <label>Notes</label>
+              <textarea id="overrideNotes" rows="2" placeholder="Internal notes…"></textarea>
+            </div>
+          </div>
+
+          <div class="field" style="margin-top:12px">
+            <label>Inspector</label>
+            <pre id="autoJson" class="codeBox">{}</pre>
+            <div class="row" style="margin-top:8px">
+              <button class="btnGhost" type="button" id="btnAutoCopyJson">Copy JSON</button>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+
+<script src="/admin/assets/admin.js"></script>
+</body>
+</html>

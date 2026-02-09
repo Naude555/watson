@@ -1,0 +1,24 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn.lock
+pnpm-lock.yaml
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# WhatsApp session + runtime data
+auth/
+data/
+uploads/
+
+# Docker/OS
+.DS_Store
+*.swp
+
+# Logs
+*.log
+
+postman/*.postman_environment.json
