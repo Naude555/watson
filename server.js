@@ -1051,6 +1051,7 @@ async function startWhatsApp() {
   const hasImage = Boolean(msg.message?.imageMessage)
   const hasDoc = Boolean(msg.message?.documentMessage)
 
+  console.log('📩 New message:', { chatJid, senderJid, textRaw, hasImage, hasDoc })
   let type = 'text'
   if (hasImage) type = 'image'
   else if (hasDoc) type = 'document'
