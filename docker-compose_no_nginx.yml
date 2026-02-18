@@ -1,7 +1,10 @@
 services:
   redis:
     image: 'redis:7-alpine'
-    command: ['redis-server', '--appendonly', 'yes']
+    command:
+      - redis-server
+      - '--appendonly'
+      - 'yes'
     volumes:
       - 'redis_data:/data'
     restart: unless-stopped
@@ -12,7 +15,7 @@ services:
     env_file:
       - .env
     expose:
-      - "3000"  # internal port only
+      - '3000'
     volumes:
       - './auth:/app/auth'
       - './uploads:/app/uploads'
@@ -20,15 +23,7 @@ services:
     depends_on:
       - redis
     restart: unless-stopped
-    labels:
-      - coolify.managed=true
-
-    # Caddy basic auth configuration
-    environment:
-      SERVICE_NAME: wa-api
-      SERVICE_PORT: 3000
-      CADDY_BASIC_AUTH: "${WA_API_USER}:${WA_API_PASSWORD}"  # will enable basic auth on your domain
 
 volumes:
   redis_data:
-    name: redis_data
+    null
