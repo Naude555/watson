@@ -22,8 +22,8 @@ services:
 
   nginx:
     image: nginx:alpine
-    expose:
-      - "80"
+    ports:
+      - "9287:80"
     volumes:
       - ./nginx/conf.d:/etc/nginx/conf.d:ro
       - ./nginx/auth:/etc/nginx/auth:ro
