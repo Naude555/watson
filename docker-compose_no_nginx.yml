@@ -22,7 +22,7 @@ services:
       - './uploads:/app/uploads'
       - './data:/data'
     healthcheck:
-      test: ["CMD-SHELL", "wget --spider --header=\"x-api-key: ${API_KEY}\" http://localhost:3000/health || exit 1"]
+      test: ["CMD-SHELL", "wget --spider --header=\"x-api-key: ${WA_API_KEY}\" http://localhost:3000/health || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
