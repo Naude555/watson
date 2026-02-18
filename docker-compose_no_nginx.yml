@@ -22,10 +22,10 @@ services:
       - './uploads:/app/uploads'
       - './data:/data'
     healthcheck:
-      test: ["CMD", "wget", "--spider", "--header=x-api-key:${API_KEY}", "http://localhost:3000/health"]
+      test: ["CMD-SHELL", "wget --spider --header=\"x-api-key: ${API_KEY}\" http://localhost:3000/health || exit 1"]
       interval: 10s
       timeout: 5s
-      retries: 10
+      retries: 5
       start_period: 15s
     depends_on:
       - redis
