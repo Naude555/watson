@@ -20,6 +20,11 @@ services:
       - './auth:/app/auth'
       - './uploads:/app/uploads'
       - './data:/data'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "-H", "x-api-key: ${API_KEY}", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     depends_on:
       - redis
     restart: unless-stopped
