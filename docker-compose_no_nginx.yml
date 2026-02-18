@@ -5,6 +5,7 @@ services:
       - redis-server
       - '--appendonly'
       - 'yes'
+    exclude_from_hc: true
     volumes:
       - 'redis_data:/data'
     restart: unless-stopped
@@ -21,10 +22,11 @@ services:
       - './uploads:/app/uploads'
       - './data:/data'
     healthcheck:
-      test: ["CMD", "curl", "-f", "-H", "x-api-key: ${API_KEY}", "http://localhost:3000/health"]
-      interval: 30s
+      test: ["CMD", "wget", "--spider", "--header=x-api-key:${API_KEY}", "http://localhost:3000/health"]
+      interval: 10s
       timeout: 5s
-      retries: 3
+      retries: 10
+      start_period: 15s
     depends_on:
       - redis
     restart: unless-stopped
