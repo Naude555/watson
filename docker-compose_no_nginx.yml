@@ -1,0 +1,27 @@
+services:
+  redis:
+    image: 'redis:7-alpine'
+    command:
+      - redis-server
+      - '--appendonly'
+      - 'yes'
+    volumes:
+      - 'redis_data:/data'
+    restart: unless-stopped
+
+  wa-api:
+    build: .
+    container_name: wa-api
+    env_file: .env
+    expose:
+      - '3000'
+    volumes:
+      - './auth:/app/auth'
+      - './uploads:/app/uploads'
+      - './data:/data'
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+volumes:
+  redis_data:
