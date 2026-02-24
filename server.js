@@ -304,36 +304,37 @@ function n8nSig(secret, bodyString) {
   return crypto.createHmac('sha256', secret).update(bodyString).digest('hex')
 }
 
-// Forward queue (memory) with retries (simple)
-const n8nQueue = []
-let n8nWorkerRunning = false
+// Forward queue (BullMQ-backed, survives restarts)
+const N8N_QUEUE_NAME = String(process.env.N8N_QUEUE_NAME || 'n8n-forward')
+
+const n8nQueue = new Queue(N8N_QUEUE_NAME, {
+  connection: redis,
+  defaultJobOptions: {
+    removeOnComplete: 2000,
+    removeOnFail: 5000,
+    attempts: 6,
+    backoff: { type: 'exponential', delay: 1000 },
+  },
+})
 
 function enqueueN8nEvent(evt) {
-  n8nQueue.push(evt)
-  startN8nWorker()
+  n8nQueue.add('forward', evt, { jobId: makeId('n8n') }).catch(e => {
+    console.warn('⚠️ Failed to enqueue n8n event:', e?.message)
+  })
 }
 
-async function startN8nWorker() {
-  if (n8nWorkerRunning) return
-  n8nWorkerRunning = true
-  while (n8nQueue.length) {
-    const job = n8nQueue.shift()
-    try {
-      await postToN8n(job)
-    } catch (e) {
-      const attempts = (job.attempts || 0) + 1
-      if (attempts <= 5) {
-        const backoff = Math.min(30_000, 1_000 * attempts * attempts)
-        job.attempts = attempts
-        // requeue after backoff
-        setTimeout(() => enqueueN8nEvent(job), backoff)
-      } else {
-        console.warn('⚠️ n8n forward failed (giving up):', e?.message)
-      }
-    }
-  }
-  n8nWorkerRunning = false
-}
+const n8nWorker = new Worker(
+  N8N_QUEUE_NAME,
+  async (bullJob) => {
+    await postToN8n(bullJob.data)
+  },
+  { connection: redis.duplicate(), concurrency: 2 }
+)
+
+n8nWorker.on('failed', (job, err) => {
+  const isLast = job && job.attemptsMade >= (job.opts?.attempts || 6)
+  if (isLast) console.warn('⚠️ n8n forward failed (giving up):', err?.message)
+})
 
 async function postToN8n(evt) {
   const url = String(automations.webhookUrl || '').trim()
@@ -721,12 +722,21 @@ function ensureMessagesStore() {
   console.log(`💬 Created messages store: ${MESSAGES_STORE_FILE}`)
 }
 
+// TODO: Migration path — JSON storage works fine at small scale, but once the
+// message store grows past ~50k records, consider migrating to SQLite (e.g.
+// better-sqlite3). Benefits: indexed queries by chatJid/ts, no full-file
+// read/write on every message, atomic writes for free, and the store won't
+// balloon memory on startup. The schema is simple enough that a single
+// "messages" table with (id, ts, chatJid, senderJid, direction, type, text,
+// media JSON, status) would cover it. Keep the JSON fallback as an import path.
 function readMessagesStore() {
   ensureMessagesStore()
   try { return JSON.parse(fs.readFileSync(MESSAGES_STORE_FILE, 'utf8')) }
   catch { return { messages: [], updatedAt: Date.now() } }
 }
 
+// TODO: See readMessagesStore comment above — writeJsonFileAtomic helps, but
+// rewriting the entire store on every message is the real bottleneck at scale.
 function writeMessagesStore(store) {
   const next = { ...store, updatedAt: Date.now() }
   fs.writeFileSync(MESSAGES_STORE_FILE, JSON.stringify(next, null, 2))
@@ -1352,13 +1362,8 @@ app.use(
   express.static(path.join(process.cwd(), 'ui/admin'))
 )
 
-// Public-ish media serving (filenames are random/unpredictable)
-app.use('/media', express.static(UPLOAD_DIR, {
-  fallthrough: false,
-  setHeaders: (res) => {
-    res.setHeader('Cache-Control', 'private, max-age=86400'); // 1 day
-  }
-}));
+// NOTE: Media files are served via the signed /media/:name route below.
+// Do NOT use express.static for /media — signature verification must run first.
 
 
 /**
@@ -1688,7 +1693,7 @@ app.get('/media/:name', (req, res) => {
   const full = path.join(UPLOAD_DIR, name)
   if (!fs.existsSync(full)) return res.status(404).send('Not found')
 
-  res.setHeader('Cache-Control', 'private, max-age=300')
+  res.setHeader('Cache-Control', 'private, max-age=86400')
   res.sendFile(path.resolve(full))
 })
 
@@ -2168,17 +2173,36 @@ function cleanupOldUploads() {
 setInterval(cleanupOldUploads, MEDIA_CLEANUP_EVERY_HOURS * 60 * 60 * 1000);
 cleanupOldUploads();
 
-async function shutdown() {
+let httpServer = null // assigned when app.listen() returns
+
+async function shutdown(signal) {
+  console.log(`\n🛑 ${signal} received — graceful shutdown starting...`)
+
+  // 1. Stop accepting new HTTP connections
+  if (httpServer) {
+    httpServer.close(() => console.log('   ✅ HTTP server closed'))
+  }
+
+  // 2. Close BullMQ workers + queues (drain in-flight jobs)
   try { await worker?.close() } catch {}
+  try { await n8nWorker?.close() } catch {}
   try { await sendQueue?.close() } catch {}
+  try { await n8nQueue?.close() } catch {}
   try { await queueEvents?.close() } catch {}
+
+  // 3. Close Baileys WhatsApp socket
+  try { sock?.end(undefined) } catch {}
+
+  // 4. Close Redis connections
   try { await queueEventsConn?.quit() } catch {}
   try { await redis?.quit() } catch {}
+
+  console.log('   ✅ Shutdown complete')
   process.exit(0)
 }
 
-process.on('SIGINT', shutdown)
-process.on('SIGTERM', shutdown)
+process.on('SIGINT', () => shutdown('SIGINT'))
+process.on('SIGTERM', () => shutdown('SIGTERM'))
 
 
 /**
@@ -2186,7 +2210,7 @@ process.on('SIGTERM', shutdown)
  * Start
  * ----------------------------
  */
-app.listen(PORT, async () => {
+httpServer = app.listen(PORT, async () => {
   console.log(`✅ API listening on http://0.0.0.0:${PORT}`)
   if (!REQUIRE_API_KEY) console.log('⚠️ WARNING: WA_API_KEY not set. Set it in .env before VPS.')
   if (!REQUIRE_ADMIN_KEY) console.log('⚠️ WARNING: WA_ADMIN_KEY not set. Admin UI/API will not work.')
