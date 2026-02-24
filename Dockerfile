@@ -3,7 +3,7 @@ FROM node:20-alpine
 WORKDIR /app
 
 # system deps (for some libs & better TLS)
-RUN apk add --no-cache tini
+RUN apk add --no-cache tini git
 
 COPY package*.json ./
 RUN npm ci --omit=dev
