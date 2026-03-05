@@ -64,6 +64,22 @@ const AUTO_REPLY_TEXT = process.env.AUTO_REPLY_TEXT || 'Hi 👋 How can I help?'
 const AUTO_REPLY_COOLDOWN_MS = Number(process.env.AUTO_REPLY_COOLDOWN_MS || 30000)
 const AUTO_REPLY_GROUP_PREFIX = process.env.AUTO_REPLY_GROUP_PREFIX || '!bot'
 const lastAutoReplyAt = new Map()
+const lastVoiceNoteAutoReplyAt = new Map()
+
+function defaultVoiceNoteAutoReplyConfig() {
+  return {
+    enabled: String(process.env.VOICE_NOTE_AUTO_REPLY_ENABLED || 'false') === 'true',
+    scope: String(process.env.VOICE_NOTE_AUTO_REPLY_SCOPE || 'both'), // dm | group | both
+    text: String(process.env.VOICE_NOTE_AUTO_REPLY_TEXT || 'Thanks for your voice note. We will get back to you shortly.'),
+    cooldownMs: Number(process.env.VOICE_NOTE_AUTO_REPLY_COOLDOWN_MS || 30000),
+    schedule: {
+      mode: String(process.env.VOICE_NOTE_AUTO_REPLY_SCHEDULE_MODE || 'always'), // always | hours
+      start: String(process.env.VOICE_NOTE_AUTO_REPLY_SCHEDULE_START || '08:00'),
+      end: String(process.env.VOICE_NOTE_AUTO_REPLY_SCHEDULE_END || '17:00'),
+      tz: String(process.env.VOICE_NOTE_AUTO_REPLY_TIMEZONE || 'Africa/Johannesburg')
+    }
+  }
+}
 
 // ----------------------------
 // n8n Automations (simple, file-backed)
@@ -145,6 +161,9 @@ function defaultAutomationsConfig() {
     // per chat/group overrides keyed by jid
     perChat: {
       // "<jid>": { enabled: false, groupMode:'all', ... }
+    },
+    autoReply: {
+      voiceNote: defaultVoiceNoteAutoReplyConfig()
     }
   }
 }
@@ -220,6 +239,51 @@ function isWithinQuietHours(rule) {
   if (start === end) return false
   if (start < end) return now >= start && now < end
   return now >= start || now < end
+}
+
+function isWithinScheduledHours(schedule) {
+  const s = schedule || {}
+  const mode = String(s.mode || 'always').toLowerCase()
+  if (mode === 'always') return true
+  if (mode !== 'hours') return false
+
+  const tz = s.tz || 'Africa/Johannesburg'
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: tz,
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false
+  }).formatToParts(new Date())
+
+  const hh = Number(parts.find(p => p.type === 'hour')?.value || '0')
+  const mm = Number(parts.find(p => p.type === 'minute')?.value || '0')
+  const now = hh * 60 + mm
+
+  const [sh, sm] = String(s.start || '00:00').split(':').map(Number)
+  const [eh, em] = String(s.end || '00:00').split(':').map(Number)
+  const start = (Number.isFinite(sh) ? sh : 0) * 60 + (Number.isFinite(sm) ? sm : 0)
+  const end = (Number.isFinite(eh) ? eh : 0) * 60 + (Number.isFinite(em) ? em : 0)
+
+  if (start === end) return false
+  if (start < end) return now >= start && now < end
+  return now >= start || now < end
+}
+
+function shouldSendVoiceNoteAutoReply({ chatJid, isGroup }) {
+  const cfg = automations?.autoReply?.voiceNote || defaultVoiceNoteAutoReplyConfig()
+  if (!cfg.enabled) return false
+
+  const scope = String(cfg.scope || 'both').toLowerCase()
+  if (scope === 'dm' && isGroup) return false
+  if (scope === 'group' && !isGroup) return false
+  if (!isWithinScheduledHours(cfg.schedule)) return false
+
+  const cooldown = Math.max(0, Number(cfg.cooldownMs || 0))
+  const last = lastVoiceNoteAutoReplyAt.get(chatJid) || 0
+  if (Date.now() - last < cooldown) return false
+  lastVoiceNoteAutoReplyAt.set(chatJid, Date.now())
+
+  return true
 }
 
 // Per-chat forwarding rate limiter
@@ -1050,11 +1114,13 @@ async function startWhatsApp() {
   const textRaw = extractTextMessage(msg)
   const hasImage = Boolean(msg.message?.imageMessage)
   const hasDoc = Boolean(msg.message?.documentMessage)
+  const hasVoiceNote = Boolean(msg.message?.audioMessage?.ptt)
 
-  console.log('📩 New message:', { chatJid, senderJid, textRaw, hasImage, hasDoc })
+  console.log('📩 New message:', { chatJid, senderJid, textRaw, hasImage, hasDoc, hasVoiceNote })
   let type = 'text'
   if (hasImage) type = 'image'
   else if (hasDoc) type = 'document'
+  else if (hasVoiceNote) type = 'voice'
 
   // Caption may be empty → still store placeholder
   let text = ''
@@ -1064,6 +1130,7 @@ async function startWhatsApp() {
     const fn = msg.message?.documentMessage?.fileName
     text = fn ? `[document] ${fn}` : '[document]'
   }
+  if (type === 'voice') text = '[voice note]'
 
   // If it's a plain text message and still empty, skip
   if (type === 'text' && !text) return
@@ -1107,6 +1174,36 @@ try {
 }
 
 // auto reply logic (optional / legacy)
+if (type === 'voice' && shouldSendVoiceNoteAutoReply({ chatJid, isGroup: group })) {
+  const cfg = automations?.autoReply?.voiceNote || defaultVoiceNoteAutoReplyConfig()
+  const outMsgId = makeId('out_voice_auto')
+  const payload = { text: String(cfg.text || 'Thanks for your voice note.') }
+
+  const outRec = {
+    id: outMsgId,
+    direction: 'out',
+    ts: Date.now(),
+    chatJid,
+    senderJid: 'me',
+    isGroup: group,
+    type: 'text',
+    text: payload.text,
+    status: 'queued',
+    media: null
+  }
+  addMessageRecord(outRec)
+  upsertRecentMessage(outRec)
+
+  await enqueue({
+    id: makeId('auto_voice_txt'),
+    jid: chatJid,
+    payload,
+    createdAt: Date.now(),
+    msgId: outMsgId,
+    chatJid
+  })
+}
+
 if (AUTO_REPLY_ENABLED) {
   if (AUTO_REPLY_SCOPE === 'dm' && group) return
   if (AUTO_REPLY_SCOPE === 'group' && !group) return
@@ -1372,6 +1469,7 @@ app.get('/health', async (req, res) => {
     groupCache: { updatedAt: groupCache.updatedAt, count: groupCache.byJid.size },
     queue: { name: WA_QUEUE_NAME, ...counts },
     autoReply: { enabled: AUTO_REPLY_ENABLED, scope: AUTO_REPLY_SCOPE },
+    voiceNoteAutoReply: (automations?.autoReply?.voiceNote || defaultVoiceNoteAutoReplyConfig()),
     messages: { storeFile: MESSAGES_STORE_FILE, max: MESSAGES_MAX, memLimit: MESSAGES_MEMORY_LIMIT }
   })
 })
