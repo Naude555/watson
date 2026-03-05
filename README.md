@@ -215,6 +215,23 @@ WA_MAX_RETRIES=5
 WA_RETRY_BACKOFF_MS=2000
 ```
 
+## Voice Note Auto Reply
+
+Use this to send an automatic text response when an inbound **voice note (PTT)** is received.
+
+```env
+VOICE_NOTE_AUTO_REPLY_ENABLED=false
+VOICE_NOTE_AUTO_REPLY_SCOPE=both        # dm | group | both
+VOICE_NOTE_AUTO_REPLY_TEXT=Thanks for your voice note. We will get back to you shortly.
+VOICE_NOTE_AUTO_REPLY_COOLDOWN_MS=30000
+
+# Scheduling
+VOICE_NOTE_AUTO_REPLY_SCHEDULE_MODE=always   # always | hours
+VOICE_NOTE_AUTO_REPLY_SCHEDULE_START=08:00   # when mode=hours
+VOICE_NOTE_AUTO_REPLY_SCHEDULE_END=17:00     # when mode=hours
+VOICE_NOTE_AUTO_REPLY_TIMEZONE=Africa/Johannesburg
+```
+
 ---
 
 # API Overview
