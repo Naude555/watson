@@ -15,7 +15,8 @@ services:
     volumes:
       - ./auth:/app/auth
       - ./uploads:/app/uploads
-      - ./data:/data 
+      - ./data:/data
+      - ./ui:/app/ui
     depends_on:
       - redis
     restart: unless-stopped

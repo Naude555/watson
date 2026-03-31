@@ -11,7 +11,7 @@
   "license": "ISC",
   "type": "module",
   "dependencies": {
-    "@whiskeysockets/baileys": "github:kobie3717/Baileys#fix/405-platform-macos",
+    "@whiskeysockets/baileys": "^6.7.21",
     "bullmq": "^5.67.3",
     "dotenv": "^17.2.3",
     "express": "^5.2.1",

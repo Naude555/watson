@@ -163,20 +163,40 @@ table{width:100%;border-collapse:collapse}
 th,td{border-bottom:1px solid rgba(255,255,255,.08);padding:10px;text-align:left;vertical-align:top}
 th{color: rgba(255,255,255,.72);font-size:12px;text-transform:uppercase;letter-spacing:.08em}
 
+/* Chat log should never exceed viewport, always scrollable, always at bottom */
 #chatLog{
-    height:430px;overflow:auto;
-    border:1px solid rgba(255,255,255,.08);
-    border-radius: 18px;
-    padding:10px;
-    background: rgba(0,0,0,.25);
-    white-space:pre-wrap;
+  max-height:calc(100vh - 320px); /* header+footer+input est. */
+  min-height:180px;
+  overflow-y:auto;
+  border:1px solid rgba(255,255,255,.08);
+  border-radius: 18px;
+  padding:10px;
+  background: rgba(0,0,0,.25);
+  white-space:pre-wrap;
+  display:flex;
+  flex-direction:column;
+  justify-content:flex-end;
 }
+/* Chat message bubble */
 .msg{
-    padding:10px 12px;border-radius:16px;margin:8px 0;
-    background: rgba(255,255,255,.05);
-    border:1px solid rgba(255,255,255,.08);
+  padding:10px 12px;
+  border-radius:16px;
+  margin:8px 0;
+  background: rgba(255,255,255,.05);
+  border:1px solid rgba(255,255,255,.08);
+  font-size:1.1em;
 }
 .meta{font-size:12px;color:rgba(255,255,255,.65);margin-bottom:6px}
+
+/* Board row large for notice board, easier to read */
+.board-row-large {
+  font-size: 1.3em;
+  padding: 18px 10px;
+  margin-bottom: 10px;
+  background: rgba(255,255,255,.04);
+  border-radius: 16px;
+  border: 1.5px solid rgba(255,255,255,.10);
+}
 .toast{
     margin-top:10px;
     padding:10px 12px;
@@ -213,12 +233,20 @@ th{color: rgba(255,255,255,.72);font-size:12px;text-transform:uppercase;letter-s
   border-color: rgba(41,209,124,.25);
   background: rgba(41,209,124,.08);
 }
+.badge.delivered{
+  border-color: rgba(86,180,255,.28);
+  background: rgba(86,180,255,.10);
+}
+.badge.read{
+  border-color: rgba(138,43,226,.35);
+  background: rgba(138,43,226,.18);
+}
 .badge.failed{
   border-color: rgba(255,77,109,.25);
   background: rgba(255,77,109,.10);
 }
 
-.bodyText{ margin-top:2px; }
+.bodyText{ margin-top:2px; white-space:pre-wrap; word-break:break-word; }
 
 .mediaWrap{ margin-top:10px; }
 

@@ -28,12 +28,14 @@
   <div class="card">
     <div class="row">
       <div class="grow2">
-        <label>Admin Key</label>
-        <input id="adminKey" placeholder="paste WA_ADMIN_KEY here"/>
+        <label>Admin Key (optional header override)</label>
+        <input id="adminKey" placeholder="optional: paste WA_ADMIN_KEY"/>
       </div>
       <div class="row" style="align-items:flex-end">
         <button class="btnPrimary" onclick="boot()">Connect</button>
         <button class="btnGhost" onclick="saveKey()">Remember</button>
+        <button class="btnGhost" onclick="forceRelink()">Force Re-pair</button>
+        <button class="btnGhost" onclick="logoutAdmin()">Logout</button>
         <button class="btnDanger" onclick="clearKey()">Clear</button>
       </div>
     </div>
@@ -41,11 +43,16 @@
     <div class="tabs">
       <div class="tab active" id="tabMessages" onclick="showTab('messages')">Messages</div>
       <div class="tab" id="tabSend" onclick="showTab('send')">Send Messages</div>
+      <div class="tab" id="tabPairing" onclick="showTab('pairing')">Pairing</div>
+      <div class="tab" id="tabSchedule" onclick="showTab('schedule')">Schedule</div>
+      <div class="tab" id="tabOps" onclick="showTab('ops')">Ops</div>
       <div class="tab" id="tabContacts" onclick="showTab('contacts')">Contacts & Aliases</div>
+      <div class="tab" id="tabGroups" onclick="showTab('groups')">Groups</div>
+      <div class="tab" id="tabRules" onclick="showTab('rules')">Rules</div>
       <div class="tab" id="tabAutomations" onclick="showTab('automations')">Automations</div>
     </div>
 
-    <div id="status" class="toast" style="margin-top:10px;">Enter admin key → Connect</div>
+    <div id="status" class="toast" style="margin-top:10px;">Connected via admin session</div>
   </div>
 
   
@@ -79,6 +86,13 @@
           <div class="small" id="chatMeta"></div>
         </div>
 
+        <div class="row" style="margin-top:8px">
+          <input id="messageSearchQuery" class="grow3" placeholder="Search messages by text / jid..." />
+          <button class="btnGhost" onclick="searchMessages()">Search</button>
+          <button class="btnGhost" onclick="clearMessageSearch()">Clear Search</button>
+        </div>
+        <div id="messageSearchResults" class="listBox hidden" style="margin-top:8px;max-height:180px;overflow:auto"></div>
+
         <div class="chatControls" style="margin-top:10px">
           <div class="segTabs">
             <button class="seg active" id="msgTabAll" onclick="setMsgFilter('all')">All</button>
@@ -96,6 +110,16 @@
             <div class="composerRow">
               <div class="small" id="replyToHint">No chat selected</div>
               <button class="btnPrimary" onclick="sendReply()">Send</button>
+            </div>
+            <div class="composerRow hidden" id="replyQuotePreviewRow" style="margin-top:8px;align-items:flex-start">
+              <div class="small grow3" id="replyQuotePreview">No quote selected</div>
+              <button class="btnGhost" type="button" onclick="clearSelectedQuote()">Clear Quote</button>
+            </div>
+            <div class="composerRow" style="margin-top:8px">
+              <label class="small" style="display:flex;align-items:center;gap:8px">
+                <input id="replyQuoteLatest" type="checkbox" checked />
+                Quote latest incoming message when available
+              </label>
             </div>
             <div class="composerRow" style="margin-top:8px">
               <input id="replyFile" type="file" class="grow3"/>
@@ -139,6 +163,15 @@
           <button class="btnDanger" onclick="clearManual()">Clear</button>
         </div>
 
+        <div class="row" style="margin-top:8px;align-items:flex-start">
+          <label class="small" style="display:flex;align-items:center;gap:8px">
+            <input id="sendUseSelectedQuote" type="checkbox" />
+            Use selected quote from Messages tab (single target only)
+          </label>
+          <button class="btnGhost" type="button" onclick="clearSelectedQuote()">Clear Quote</button>
+        </div>
+        <div id="sendQuoteHint" class="small" style="margin-top:6px">No selected quote</div>
+
         <div class="small" style="margin-top:8px">
           Sending uses <strong>Manual To</strong> if filled, otherwise the multi-select list.
           Phone example: <code>0821234567</code>. JID example: <code>1203...@g.us</code>.
@@ -162,6 +195,102 @@
         </div>
       </div>
 
+    </div>
+  </div>
+
+  <!-- PAIRING -->
+  <div id="panelPairing" class="hidden">
+    <div class="grid one">
+      <div class="card">
+        <div class="row" style="justify-content:space-between;align-items:flex-start;gap:12px">
+          <div>
+            <div style="font-weight:900;font-size:16px">Pairing</div>
+            <div class="small">Scan QR from here when WhatsApp is disconnected or after relink.</div>
+          </div>
+          <div class="row">
+            <button class="btnGhost" type="button" onclick="connectPairingStream()">Reconnect Stream</button>
+            <button class="btnGhost" type="button" onclick="refreshPairingQr()">Refresh QR</button>
+          </div>
+        </div>
+
+        <div class="row" style="margin-top:10px;align-items:flex-start;gap:14px">
+          <img id="pairingQrImage" alt="Pairing QR" style="width:300px;height:300px;max-width:42vw;object-fit:contain;background:#111;border:1px solid rgba(255,255,255,.12);border-radius:12px" />
+          <div class="grow2">
+            <div class="small" id="pairingStatusText">Waiting for stream…</div>
+            <div class="small" id="pairingQrHint" style="margin-top:8px;opacity:.9">QR will appear when pairing is required.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SCHEDULE -->
+  <div id="panelSchedule" class="hidden">
+    <div class="grid one">
+      <div class="card">
+        <div class="row" style="justify-content:space-between">
+          <div>
+            <div style="font-weight:900;font-size:16px">Scheduled Broadcast</div>
+            <div class="small">Schedule text broadcasts to one or many targets.</div>
+          </div>
+          <div class="row">
+            <button class="btnGhost" onclick="loadSchedules()">Refresh</button>
+          </div>
+        </div>
+
+        <div class="row" style="margin-top:10px">
+          <textarea id="scheduleTargets" class="grow3" rows="3" placeholder="Targets (name/phone/jid), comma or newline separated"></textarea>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <textarea id="scheduleMessage" class="grow3" rows="3" placeholder="Broadcast message"></textarea>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <input id="scheduleSendAt" type="datetime-local" class="grow" />
+          <button class="btnPrimary" onclick="createSchedule()">Create Schedule</button>
+        </div>
+
+        <div id="scheduleList" class="listBox" style="margin-top:10px;max-height:320px;overflow:auto"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- OPS -->
+  <div id="panelOps" class="hidden">
+    <div class="grid">
+      <div class="card">
+        <div class="row" style="justify-content:space-between">
+          <div>
+            <div style="font-weight:900;font-size:16px">Connection & Queue</div>
+            <div class="small">Operational controls and live status.</div>
+          </div>
+          <button class="btnGhost" onclick="loadOps()">Refresh</button>
+        </div>
+
+        <div class="row" style="margin-top:10px">
+          <button class="btnGhost" onclick="forceRelink()">Force Re-pair</button>
+          <button class="btnDanger" onclick="forceLogoutNow()">Force Logout</button>
+          <button class="btnGhost" onclick="refreshGroupCacheNow()">Refresh Group Cache</button>
+        </div>
+
+        <pre id="opsConnectionBox" class="codeBox" style="margin-top:10px">{}</pre>
+      </div>
+
+      <div class="card">
+        <div class="row" style="justify-content:space-between">
+          <div>
+            <div style="font-weight:900;font-size:16px">n8n Test & Dead Letters</div>
+            <div class="small">Send test webhook and inspect failed forwards.</div>
+          </div>
+        </div>
+
+        <div class="row" style="margin-top:10px">
+          <input id="opsN8nTestText" class="grow2" placeholder="Optional test message" />
+          <button class="btnPrimary" onclick="sendN8nTest()">Send Test</button>
+          <button class="btnGhost" onclick="loadN8nDeadLetters()">Reload Dead Letters</button>
+        </div>
+
+        <div id="opsDeadLetters" class="listBox" style="margin-top:10px;max-height:260px;overflow:auto"></div>
+      </div>
     </div>
   </div>
     </div>
@@ -214,6 +343,189 @@
         </div>
       </div>
 
+    </div>
+  </div>
+
+  <!-- Groups Management -->
+  <div id="panelGroups" class="hidden">
+    <div class="grid one">
+      <div class="card">
+        <div class="row" style="justify-content:space-between;align-items:flex-start;gap:12px">
+          <div>
+            <div style="font-weight:900;font-size:16px">WhatsApp Group Management</div>
+            <div class="small">Create groups, manage members, update subject/description, and leave groups.</div>
+          </div>
+          <div class="row">
+            <button class="btnGhost" type="button" onclick="loadWaGroupsManager()">Refresh Groups</button>
+          </div>
+        </div>
+
+        <div class="panel" style="margin-top:12px">
+          <div style="font-weight:800;margin-bottom:8px">Create Group</div>
+          <div class="row">
+            <input id="gmCreateSubject" class="grow2" placeholder="Group subject (required)" />
+            <button class="btnPrimary" type="button" onclick="createWaGroup()">Create</button>
+          </div>
+          <textarea id="gmCreateParticipants" rows="3" style="margin-top:8px" placeholder="Participants (name / phone / jid). Separate with comma or newline"></textarea>
+        </div>
+
+        <div class="panel" style="margin-top:12px">
+          <div style="font-weight:800;margin-bottom:8px">Select Group</div>
+          <div class="row">
+            <select id="gmGroupPick" class="grow3" onchange="selectWaGroupForManager()"></select>
+            <button class="btnGhost" type="button" onclick="loadSelectedGroupInfo()">Load Info</button>
+          </div>
+          <div class="small" id="gmSelectedMeta" style="margin-top:8px">No group selected</div>
+        </div>
+
+        <div class="grid" style="margin-top:12px">
+          <div class="card" style="padding:12px">
+            <div style="font-weight:800">Participants</div>
+            <textarea id="gmParticipantsInput" rows="5" style="margin-top:8px" placeholder="Participants (name / phone / jid). Separate with comma or newline"></textarea>
+            <div class="row" style="margin-top:8px">
+              <button class="btnPrimary" type="button" onclick="groupParticipantsAction('add')">Add</button>
+              <button class="btnDanger" type="button" onclick="groupParticipantsAction('remove')">Remove</button>
+              <button class="btnGhost" type="button" onclick="groupParticipantsAction('promote')">Promote</button>
+              <button class="btnGhost" type="button" onclick="groupParticipantsAction('demote')">Demote</button>
+            </div>
+          </div>
+
+          <div class="card" style="padding:12px">
+            <div style="font-weight:800">Group Settings</div>
+            <div style="margin-top:8px">
+              <label>Subject</label>
+              <div class="row">
+                <input id="gmSubject" class="grow3" placeholder="New subject" />
+                <button class="btnGhost" type="button" onclick="updateSelectedGroupSubject()">Update</button>
+              </div>
+            </div>
+            <div style="margin-top:10px">
+              <label>Description</label>
+              <textarea id="gmDescription" rows="3" placeholder="New description"></textarea>
+              <div class="row" style="margin-top:8px">
+                <button class="btnGhost" type="button" onclick="updateSelectedGroupDescription()">Update Description</button>
+                <button class="btnDanger" type="button" onclick="leaveSelectedGroup()">Leave Group</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel" style="margin-top:12px">
+          <div style="font-weight:800">Group Info</div>
+          <pre id="gmInfoBox" class="codeBox" style="margin-top:8px">{}</pre>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Response Rules -->
+  <div id="panelRules" class="hidden">
+    <div class="card">
+      <div class="row" style="justify-content:space-between;align-items:flex-start;gap:12px">
+        <div>
+          <div style="font-weight:900;font-size:16px">Response Rules</div>
+          <div class="small">Create text and voice-note auto replies without restarting the service. Voice-note rules can target DMs, groups, or both.</div>
+        </div>
+        <div class="row" style="align-items:flex-end">
+          <button class="btnGhost" type="button" id="btnRulesReload">Reload</button>
+          <button class="btnGhost" type="button" id="btnRulesNew">New Rule</button>
+          <button class="btnPrimary" type="button" id="btnRulesSave">Save Rule</button>
+          <button class="btnDanger" type="button" id="btnRulesDelete" disabled>Delete</button>
+        </div>
+      </div>
+
+      <div class="field" style="margin-top:12px">
+        <label class="row"><input type="checkbox" id="rulesEnabled"> <span><b>Enable response rules</b></span></label>
+        <div class="small">When enabled, matching rules run before the legacy `AUTO_REPLY_*` env fallback.</div>
+      </div>
+
+      <div class="grid2" style="margin-top:12px">
+        <div class="panel">
+          <div style="font-weight:800;margin-bottom:8px">Rule List</div>
+          <div id="rulesList" class="listBox" style="max-height:420px;overflow:auto"></div>
+        </div>
+
+        <div class="panel">
+          <div class="field">
+            <label>Selected Rule</label>
+            <div class="row">
+              <div class="grow3">
+                <div id="ruleSelectedTitle" style="font-weight:700">New rule</div>
+                <div id="ruleSelectedMeta" class="small">Text rule</div>
+              </div>
+              <span id="ruleSelectedBadge" class="badge type">Draft</span>
+            </div>
+          </div>
+
+          <div class="field">
+            <label class="row"><input type="checkbox" id="ruleEnabled" checked> <span>Rule enabled</span></label>
+          </div>
+
+          <div class="field">
+            <label>Name</label>
+            <input id="ruleName" type="text" placeholder="Example: Help keyword in groups" />
+          </div>
+
+          <div class="field">
+            <div class="row">
+              <div class="grow">
+                <label>Trigger Type</label>
+                <select id="ruleTriggerType">
+                  <option value="text">Text</option>
+                  <option value="voice_note">Voice note</option>
+                </select>
+              </div>
+              <div class="grow">
+                <label>Scope</label>
+                <select id="ruleScope">
+                  <option value="both">DM + Group</option>
+                  <option value="dm">DM only</option>
+                  <option value="group">Group only</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div class="field" id="ruleMatchBlock">
+            <label>Match</label>
+            <div class="row">
+              <select id="ruleMatchType" style="max-width:180px">
+                <option value="contains">Contains</option>
+                <option value="equals">Equals</option>
+                <option value="regex">Regex</option>
+                <option value="any">Any text</option>
+              </select>
+              <input id="ruleMatchValue" class="grow3" placeholder="help / quote / regex pattern" />
+            </div>
+          </div>
+
+          <div class="field" id="rulePrefixBlock">
+            <label class="row"><input type="checkbox" id="ruleRequirePrefix"> <span>Require group prefix before matching text</span></label>
+            <div class="row" style="margin-top:8px">
+              <input id="ruleGroupPrefix" class="grow2" placeholder="!bot" />
+              <div class="small grow3">Used only for text rules in groups.</div>
+            </div>
+          </div>
+
+          <div class="field">
+            <label>Cooldown</label>
+            <div class="row">
+              <input id="ruleCooldownMs" type="number" min="0" value="30000" style="max-width:180px" />
+              <div class="small">milliseconds before this rule may reply again in the same chat</div>
+            </div>
+          </div>
+
+          <div class="field">
+            <label>Reply Text</label>
+            <textarea id="ruleReplyText" rows="4" placeholder="Hi 👋 How can I help?"></textarea>
+          </div>
+
+          <div class="field">
+            <label>Inspector</label>
+            <pre id="rulesInspector" class="codeBox">{}</pre>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 

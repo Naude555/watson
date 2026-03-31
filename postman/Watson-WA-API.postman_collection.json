@@ -11,8 +11,11 @@
     { "key": "adminKey", "value": "YOUR_WA_ADMIN_KEY" },
     { "key": "toPhone", "value": "27820000000" },
     { "key": "toJid", "value": "27820000000@s.whatsapp.net" },
+    { "key": "toWJid", "value": "27820000000@w.whatsapp.net" },
+    { "key": "toLid", "value": "128698862833695@lid" },
     { "key": "groupJid", "value": "1203630xxxxx@g.us" },
-    { "key": "contactName", "value": "Oppies" }
+    { "key": "contactName", "value": "Oppies" },
+    { "key": "contactNewName", "value": "Oppies Updated" }
   ],
   "item": [
     {
@@ -24,7 +27,15 @@
             "method": "GET",
             "header": [{ "key": "x-api-key", "value": "{{apiKey}}" }],
             "url": { "raw": "{{baseUrl}}/health", "host": ["{{baseUrl}}"], "path": ["health"] }
-          }
+          },
+          "event": [{
+            "listen": "test",
+            "script": { "type": "text/javascript", "exec": [
+              "pm.test('health status is 200', function () { pm.response.to.have.status(200); });",
+              "const j = pm.response.json();",
+              "pm.test('health response is ok', function () { pm.expect(j.ok).to.eql(true); });"
+            ] }
+          }]
         },
         {
           "name": "Send Text",
@@ -39,7 +50,16 @@
               "raw": "{\n  \"to\": \"{{toPhone}}\",\n  \"message\": \"Hello from Postman (Integration)\"\n}"
             },
             "url": { "raw": "{{baseUrl}}/send", "host": ["{{baseUrl}}"], "path": ["send"] }
-          }
+          },
+          "event": [{
+            "listen": "test",
+            "script": { "type": "text/javascript", "exec": [
+              "pm.test('send text status is 200', function () { pm.response.to.have.status(200); });",
+              "const j = pm.response.json();",
+              "pm.test('send text returns ok', function () { pm.expect(j.ok).to.eql(true); });",
+              "pm.test('send text returns ids', function () { pm.expect(j).to.have.any.keys('msgId', 'id', 'jobId'); });"
+            ] }
+          }]
         },
         {
           "name": "Send Image (multipart upload)",
@@ -109,12 +129,27 @@
       "name": "Admin (x-admin-key)",
       "item": [
         {
-          "name": "Targets (contacts + groups + WA groups)",
+          "name": "Targets (contacts + groups + WA groups, includes msisdnIntl)",
           "request": {
             "method": "GET",
             "header": [{ "key": "x-admin-key", "value": "{{adminKey}}" }],
             "url": { "raw": "{{baseUrl}}/admin/targets", "host": ["{{baseUrl}}"], "path": ["admin", "targets"] }
-          }
+          },
+          "event": [{
+            "listen": "test",
+            "script": { "type": "text/javascript", "exec": [
+              "pm.test('targets status is 200', function () { pm.response.to.have.status(200); });",
+              "const j = pm.response.json();",
+              "pm.test('targets has contacts array', function () { pm.expect(Array.isArray(j.contacts)).to.eql(true); });",
+              "if (j.contacts.length) {",
+              "  pm.test('contact includes identity fields', function () {",
+              "    pm.expect(j.contacts[0]).to.have.property('msisdn');",
+              "    pm.expect(j.contacts[0]).to.have.property('msisdnIntl');",
+              "    pm.expect(j.contacts[0]).to.have.property('to');",
+              "  });",
+              "}"
+            ] }
+          }]
         },
         {
           "name": "Contacts - List",
@@ -137,7 +172,90 @@
               "raw": "{\n  \"name\": \"Oppies\",\n  \"msisdn\": \"0820000000\",\n  \"tags\": [\"vip\", \"internal\"]\n}"
             },
             "url": { "raw": "{{baseUrl}}/admin/contacts", "host": ["{{baseUrl}}"], "path": ["admin", "contacts"] }
+          },
+          "event": [{
+            "listen": "test",
+            "script": { "type": "text/javascript", "exec": [
+              "pm.test('contacts upsert status is 200', function () { pm.response.to.have.status(200); });",
+              "const j = pm.response.json();",
+              "pm.test('contacts upsert returns ok', function () { pm.expect(j.ok).to.eql(true); });",
+              "pm.test('contact has normalized jid + number variants', function () {",
+              "  pm.expect(j.contact).to.have.property('jid');",
+              "  pm.expect(j.contact).to.have.property('msisdn');",
+              "});",
+              "if (j.contact && j.contact.name) pm.collectionVariables.set('contactName', j.contact.name);"
+            ] }
+          }]
+        },
+        {
+          "name": "Contacts - Upsert (w.whatsapp.net normalizes to s.whatsapp.net)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "x-admin-key", "value": "{{adminKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"{{contactName}}\",\n  \"jid\": \"{{toWJid}}\",\n  \"tags\": [\"jid-variant\"]\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/admin/contacts", "host": ["{{baseUrl}}"], "path": ["admin", "contacts"] }
           }
+        },
+        {
+          "name": "Contacts - Update (rename + phone)",
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "x-admin-key", "value": "{{adminKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"newName\": \"{{contactNewName}}\",\n  \"msisdn\": \"0820000000\",\n  \"tags\": [\"vip\", \"updated\"]\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/admin/contacts/{{contactName}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "contacts", "{{contactName}}"]
+            }
+          },
+          "event": [{
+            "listen": "test",
+            "script": { "type": "text/javascript", "exec": [
+              "pm.test('contacts update status is 200', function () { pm.response.to.have.status(200); });",
+              "const j = pm.response.json();",
+              "pm.test('contacts update returns ok', function () { pm.expect(j.ok).to.eql(true); });",
+              "pm.test('contacts update renamed contact', function () { pm.expect(j.contact.name).to.eql(pm.collectionVariables.get('contactNewName')); });",
+              "if (j.contact && j.contact.name) pm.collectionVariables.set('contactName', j.contact.name);"
+            ] }
+          }]
+        },
+        {
+          "name": "Contacts - Upsert (LID + phone merge)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "x-admin-key", "value": "{{adminKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"{{contactName}}\",\n  \"jid\": \"{{toLid}}\",\n  \"msisdn\": \"0820000000\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/admin/contacts", "host": ["{{baseUrl}}"], "path": ["admin", "contacts"] }
+          },
+          "event": [{
+            "listen": "test",
+            "script": { "type": "text/javascript", "exec": [
+              "pm.test('lid + phone merge status is 200', function () { pm.response.to.have.status(200); });",
+              "const j = pm.response.json();",
+              "pm.test('lid merge returns ok', function () { pm.expect(j.ok).to.eql(true); });",
+              "pm.test('lid merge resolves to phone-based jid when available', function () {",
+              "  pm.expect(String(j.contact.jid || '')).to.include('@s.whatsapp.net');",
+              "});"
+            ] }
+          }]
         },
         {
           "name": "Contacts - Delete",
@@ -184,7 +302,22 @@
             "method": "GET",
             "header": [{ "key": "x-admin-key", "value": "{{adminKey}}" }],
             "url": { "raw": "{{baseUrl}}/admin/messages/chats", "host": ["{{baseUrl}}"], "path": ["admin", "messages", "chats"] }
-          }
+          },
+          "event": [{
+            "listen": "test",
+            "script": { "type": "text/javascript", "exec": [
+              "pm.test('chat list status is 200', function () { pm.response.to.have.status(200); });",
+              "const j = pm.response.json();",
+              "pm.test('chat list has chats array', function () { pm.expect(Array.isArray(j.chats)).to.eql(true); });",
+              "const contactJid = (pm.collectionVariables.get('toJid') || '').trim();",
+              "if (contactJid) {",
+              "  pm.test('chat list includes seeded contact jid when present', function () {",
+              "    const found = j.chats.some(c => String(c.chatJid || '') === contactJid);",
+              "    pm.expect(found).to.eql(true);",
+              "  });",
+              "}"
+            ] }
+          }]
         },
         {
           "name": "Messages - Chat messages (by jid)",
