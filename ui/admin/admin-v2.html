@@ -1380,14 +1380,14 @@
             <h3>WhatsApp Pairing</h3>
             <div class="card-desc">Scan QR to link your WhatsApp account</div>
             
-            <img id="qrImage" src="/pairing/qr.png" alt="QR Code" style="width: 100%; max-width: 300px; margin-top: 12px; border-radius: 8px; background: #0a0a0f; padding: 8px; border: 1px solid #22252d;" />
+            <img id="qrImage" src="/admin/pairing/qr.png" alt="QR Code" style="width: 100%; max-width: 300px; margin-top: 12px; border-radius: 8px; background: #ffffff; padding: 8px; border: 1px solid #22252d;" />
             
             <div class="info-box" style="margin-top: 12px;">
               <div id="pairingStatus">Loading…</div>
             </div>
             
             <div class="row" style="margin-top: 12px;">
-              <button class="btn-ghost" onclick="refreshQr()">Refresh QR</button>
+              <button class="btn-ghost" onclick="manualRefreshQr()">Refresh QR</button>
               <button onclick="forceRelink()">Force Re-pair</button>
             </div>
           </div>
@@ -1428,6 +1428,7 @@
             
             <div class="card">
               <h3>Your Contacts</h3>
+              <input id="contactsSearch" placeholder="Search name, number, jid, tag…" oninput="filterContactsList()" style="margin-top:8px;margin-bottom:12px;" />
               <div style="margin-bottom:12px;">
                 <div class="label">Likely duplicates</div>
                 <div id="contactsMergeSuggestions"></div>
@@ -1507,6 +1508,25 @@
               <option value="dm">DM only</option>
               <option value="group">Group only</option>
             </select>
+
+            <div class="label" style="margin-top: 8px;">DM Sender Filter</div>
+            <select id="ruleDmFilterMode" onchange="updateRuleDmFilterDisplay()">
+              <option value="all">Apply to all DMs</option>
+              <option value="include">Apply only to listed senders</option>
+              <option value="exclude">Skip listed senders</option>
+            </select>
+
+            <div id="ruleDmFilterBox" style="display:none;">
+              <div class="label" style="margin-top: 8px;">Pick senders from contacts</div>
+              <input id="ruleDmFilterSearch" placeholder="Filter contacts by name/number/jid…" oninput="syncRuleDmFilterPicker()" />
+              <select id="ruleDmFilterPickList" multiple size="6" ondblclick="addSelectedSendersToRuleList()" style="margin-top:8px;"></select>
+              <div class="row" style="margin-top:8px;">
+                <button class="btn-ghost" type="button" onclick="addSelectedSendersToRuleList()">Add Selected</button>
+                <button class="btn-ghost" type="button" onclick="addAllFilteredSendersToRuleList()">Add All Filtered</button>
+              </div>
+              <div class="label" style="margin-top: 8px;">DM Sender List</div>
+              <div id="ruleDmFilterChips" class="recipient-chips" style="min-height:38px;padding:6px 8px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:8px;align-content:flex-start;"></div>
+            </div>
             
             <div class="label" style="margin-top: 8px;">Match Mode</div>
             <select id="ruleMatch" onchange="updateRuleMatchDisplay()">
@@ -1745,6 +1765,50 @@
                 <div class="ops-config-body">
                   <div class="card-desc">Runtime settings replace .env defaults after boot</div>
 
+                  <div class="ops-section-title">Public API Switches</div>
+                  <div class="ops-toggle-list">
+                    <div class="ops-toggle-row">
+                      <div>
+                        <div class="ops-toggle-title">Public API enabled</div>
+                        <div class="ops-toggle-desc">Master switch for all public /send endpoints.</div>
+                      </div>
+                      <label class="ui-toggle" aria-label="Toggle public API">
+                        <input id="opsApiEnabled" type="checkbox" />
+                        <span class="ui-toggle-track"></span>
+                      </label>
+                    </div>
+                    <div class="ops-toggle-row">
+                      <div>
+                        <div class="ops-toggle-title">Text API enabled</div>
+                        <div class="ops-toggle-desc">Allow POST /send.</div>
+                      </div>
+                      <label class="ui-toggle" aria-label="Toggle text API">
+                        <input id="opsApiSendTextEnabled" type="checkbox" />
+                        <span class="ui-toggle-track"></span>
+                      </label>
+                    </div>
+                    <div class="ops-toggle-row">
+                      <div>
+                        <div class="ops-toggle-title">Image API enabled</div>
+                        <div class="ops-toggle-desc">Allow POST /send/image.</div>
+                      </div>
+                      <label class="ui-toggle" aria-label="Toggle image API">
+                        <input id="opsApiSendImageEnabled" type="checkbox" />
+                        <span class="ui-toggle-track"></span>
+                      </label>
+                    </div>
+                    <div class="ops-toggle-row">
+                      <div>
+                        <div class="ops-toggle-title">Document API enabled</div>
+                        <div class="ops-toggle-desc">Allow POST /send/document.</div>
+                      </div>
+                      <label class="ui-toggle" aria-label="Toggle document API">
+                        <input id="opsApiSendDocumentEnabled" type="checkbox" />
+                        <span class="ui-toggle-track"></span>
+                      </label>
+                    </div>
+                  </div>
+
                   <div class="ops-toggle-list">
                     <div class="ops-toggle-row">
                       <div>
@@ -1837,10 +1901,31 @@
                     <div class="ops-field ops-advanced"><div class="label">Max Requests</div><input id="opsRateLimitMax" type="number" min="1" step="1" /></div>
                   </div>
 
+                  <div class="ops-section-title">Messages</div>
+                  <div class="ops-grid">
+                    <div class="ops-field">
+                      <div class="label">Chat Fetch Limit</div>
+                      <input id="opsMessagesUiFetchLimit" type="number" min="50" step="50" />
+                      <div class="ops-help">How many messages to load per chat in UI (default 500).</div>
+                    </div>
+                    <div class="ops-field">
+                      <div class="label">Persist Max Messages</div>
+                      <input id="opsMessagesPersistMax" type="number" min="0" step="100" />
+                      <div class="ops-help">0 = save everything. Set a value to cap storage size.</div>
+                    </div>
+                  </div>
+
                   <div class="ops-section-title ops-advanced">Media</div>
-                  <div class="ops-field ops-advanced">
-                    <div class="label">Signed URL TTL (seconds)</div>
-                    <input id="opsMediaUrlTtlSeconds" type="number" min="60" step="60" />
+                  <div class="ops-grid">
+                    <div class="ops-field ops-advanced">
+                      <div class="label">Signed URL TTL (seconds)</div>
+                      <input id="opsMediaUrlTtlSeconds" type="number" min="60" step="60" />
+                    </div>
+                    <div class="ops-field">
+                      <div class="label">Media Retention (days)</div>
+                      <input id="opsMediaRetentionDays" type="number" min="1" step="1" />
+                      <div class="ops-help">Files older than this are deleted from server (default 7 days).</div>
+                    </div>
                   </div>
 
               <div class="row" style="margin-top: 10px;">
@@ -1858,6 +1943,6 @@
   
   <div class="toast hidden" id="toast"></div>
   
-  <script src="/admin/assets/admin-v2.js"></script>
+  <script src="/admin/assets/admin-v2.js?v=20260403-04"></script>
 </body>
 </html>

@@ -47,6 +47,7 @@ Designed for **single-server production deployments**, with safety-first throttl
 - Durable outbound queue using **Redis + BullMQ**
 - Strong built-in throttling to reduce ban risk
 - Signed media URLs for secure previews
+- Optional PostgreSQL-backed settings and message storage
 - Contact & group alias management
 - Chat history browsing
 - Optional **n8n webhook forwarding**
@@ -66,8 +67,9 @@ nginx (TLS + Basic Auth)
 wa-api (Node.js / Express / Baileys)
    │
    ├── Redis        → durable outbound queue
+   ├── PostgreSQL   → optional runtime settings + messages
    ├── auth/        → WhatsApp session
-   ├── data/        → contacts, messages, automations
+   ├── data/        → contacts, automations (and JSON fallback)
    └── uploads/     → media files
 ```
 
@@ -204,6 +206,32 @@ MEDIA_SIGNING_SECRET | Media URL signing |
 |----------|-------------|
 REDIS_URL | Redis connection string |
 WA_QUEUE_NAME | Queue name |
+
+## Storage (PostgreSQL with SQLite fallback)
+
+| Variable | Description |
+|----------|-------------|
+| STORAGE_BACKEND | `postgres` or `sqlite` (default `sqlite`) |
+| DATABASE_URL | PostgreSQL connection string |
+| PG_HOST | PostgreSQL host (if not using `DATABASE_URL`) |
+| PG_PORT | PostgreSQL port (default `5432`) |
+| PG_DATABASE | PostgreSQL database name |
+| PG_USER | PostgreSQL username |
+| PG_PASSWORD | PostgreSQL password |
+| PG_SSL | Set `true` to enable SSL mode |
+| SQLITE_FILE | SQLite database file path for fallback/default |
+
+When `STORAGE_BACKEND=postgres`, the app uses PostgreSQL if configured (`DATABASE_URL` or `PG_*`).
+If PostgreSQL is not configured or init fails, it falls back to SQLite automatically.
+
+In DB-backed mode:
+- runtime settings are stored in the active DB backend (PostgreSQL or SQLite)
+- messages are persisted to the active DB backend (PostgreSQL or SQLite)
+
+Runtime controls in Admin UI → Operations:
+- `messages.uiFetchLimit` (default `500`)
+- `messages.persistMax` (`0` means save everything)
+- `media.retentionDays` (default `7`)
 
 ## Throttling (Safe Defaults)
 

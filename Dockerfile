@@ -3,7 +3,8 @@ FROM node:20-alpine
 WORKDIR /app
 
 # system deps (for some libs & better TLS)
-RUN apk add --no-cache tini git
+# includes build tools for native Node modules (e.g. better-sqlite3)
+RUN apk add --no-cache tini git python3 make g++
 
 COPY package*.json ./
 RUN npm ci --omit=dev

@@ -10,10 +10,12 @@ services:
     build: .
     container_name: wa-api
     env_file: .env
+    environment:
+      WA_AUTO_CLEAR_AUTH_ON_BOOT: "0"
+      WA_FORCE_LATEST_WEB_VERSION: "1"
     expose:
       - "3000"
     volumes:
-      - ./auth:/app/auth
       - ./uploads:/app/uploads
       - ./data:/data
       - ./ui:/app/ui
@@ -27,7 +29,6 @@ services:
       - "9287:80"
     volumes:
       - ./nginx/conf.d:/etc/nginx/conf.d:ro
-      - ./nginx/auth:/etc/nginx/auth:ro
     depends_on:
       - wa-api
     restart: unless-stopped

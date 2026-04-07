@@ -23,20 +23,22 @@ let automationSettings = {};
 let editingRuleId = '';
 let editingTemplateId = '';
 let editingContactOriginalName = '';
+let contactsSearchQuery = '';
 let opsMode = 'basic';
 let chatRenderToken = 0;
 const chatFingerprintByJid = new Map();
 let adminCsrfToken = '';
 let adminCsrfPromise = null;
 const linkPreviewCache = new Map();
-const CHAT_FETCH_LIMIT = 180;
-const CHAT_RENDER_LIMIT = 100;
+let chatFetchLimit = 500;
+const CHAT_RENDER_LIMIT = 500;
 
 const contactNameByJid = new Map();
 const contactNameByMsisdn = new Map();
 const groupAliasByJid = new Map();
 const waGroupNameByJid = new Map();
 const waContactNameByJid = new Map();
+const canonicalChatJidByAlias = new Map();
 const CHAT_LAST_SEEN_STORAGE_KEY = 'watson.admin.chatLastSeen.v1';
 const chatUnreadCountByJid = new Map();
 let activeChatUnreadSinceTs = 0;
@@ -193,7 +195,10 @@ function showPanel(name, btnEl) {
   
   document.getElementById('panelTitle').textContent = titles[name] || 'Watson';
   
-  if (name === 'pairing') connectPairingStream();
+  if (name === 'pairing') {
+    connectPairingStream();
+    refreshQr({ quiet: true, force: true });
+  }
   if (name === 'messages') connectMessagesStream();
   if (name === 'messages' && currentChat?.jid) {
     loadChatMessages(currentChat.jid, true).catch(() => {});
@@ -203,7 +208,10 @@ function showPanel(name, btnEl) {
   }
   if (name === 'contacts') loadContacts();
   if (name === 'groups') loadGroups();
-  if (name === 'rules') loadRules();
+  if (name === 'rules') {
+    loadContacts().catch(() => {});
+    loadRules();
+  }
   if (name === 'templates') loadTemplates();
   if (name === 'schedule') loadSchedules();
   if (name === 'ops') loadOps();
@@ -295,6 +303,7 @@ function splitTargets(raw) {
 // ─────────────────────────────────────────────────────────────────────────────
 let sendRecipients = [];   // { label, value }
 let schedRecipients = [];  // { label, value }
+let ruleDmFilterSenders = [];  // { label, value }
 
 function normalizeTagValue(tag) {
   return String(tag || '').trim().toLowerCase();
@@ -418,10 +427,6 @@ function contactIdentifierSummary(c) {
 
 function contactPrimaryTarget(c) {
   return String(c?.msisdn || '').trim() || String(c?.jid || '').trim() || String(c?.name || '').trim();
-}
-
-function digitsOnly(value) {
-  return String(value || '').replace(/\D/g, '');
 }
 
 function canonicalPhoneSeed(c) {
@@ -950,6 +955,46 @@ function displayNameForJid(jid) {
   return prettyPhoneFromJid(j) || j;
 }
 
+function normalizeUiJid(raw) {
+  const j = String(raw || '').trim().toLowerCase();
+  if (!j) return '';
+  if (j.endsWith('@w.whatsapp.net')) return j.replace('@w.whatsapp.net', '@s.whatsapp.net');
+  return j;
+}
+
+function preferredCanonicalJidForContact(contact) {
+  const ids = [
+    String(contact?.jid || '').trim(),
+    ...(Array.isArray(contact?.aliasJids) ? contact.aliasJids.map(v => String(v || '').trim()) : [])
+  ].map(normalizeUiJid).filter(Boolean);
+  if (!ids.length) return '';
+  const phoneJid = ids.find(v => /@(s|w)\.whatsapp\.net$/i.test(v));
+  if (phoneJid) return normalizeUiJid(phoneJid);
+  const nonLid = ids.find(v => !v.endsWith('@lid'));
+  if (nonLid) return nonLid;
+  return ids[0];
+}
+
+function rebuildCanonicalChatJidMap(contactRows = []) {
+  canonicalChatJidByAlias.clear();
+  for (const c of (contactRows || [])) {
+    const canonical = preferredCanonicalJidForContact(c);
+    if (!canonical) continue;
+    const ids = [
+      String(c?.jid || '').trim(),
+      ...(Array.isArray(c?.aliasJids) ? c.aliasJids.map(v => String(v || '').trim()) : [])
+    ].map(normalizeUiJid).filter(Boolean);
+    canonicalChatJidByAlias.set(canonical, canonical);
+    for (const id of ids) canonicalChatJidByAlias.set(id, canonical);
+  }
+}
+
+function canonicalizeChatJidForUi(raw) {
+  const normalized = normalizeUiJid(raw);
+  if (!normalized || normalized.endsWith('@g.us')) return normalized;
+  return canonicalChatJidByAlias.get(normalized) || normalized;
+}
+
 async function loadChats() {
   try {
     const [targets, chatData] = await Promise.all([
@@ -963,10 +1008,13 @@ async function loadChats() {
     waGroupNameByJid.clear();
     waContactNameByJid.clear();
 
-    for (const c of targets.contacts || []) {
+    const targetContacts = Array.isArray(targets.contacts) ? targets.contacts : [];
+    rebuildCanonicalChatJidMap(targetContacts);
+
+    for (const c of targetContacts) {
       const name = String(c.name || '').trim();
-      const jid = String(c.jid || '').trim();
-      const aliasJids = Array.isArray(c?.aliasJids) ? c.aliasJids : [];
+      const jid = normalizeUiJid(c.jid || '');
+      const aliasJids = Array.isArray(c?.aliasJids) ? c.aliasJids.map(v => normalizeUiJid(v)) : [];
       const ms = String(c.msisdn || '').replace(/\D/g, '');
       if (name && jid) contactNameByJid.set(jid, name);
       if (name && aliasJids.length) {
@@ -1000,12 +1048,35 @@ async function loadChats() {
       if (name && jid) waContactNameByJid.set(jid, name);
     }
 
-    chats = (chatData.chats || []).map(c => ({
+    chats = (chatData.chats || []).map(c => {
+      const canonicalJid = canonicalizeChatJidForUi(c.chatJid);
+      return {
       ...c,
-      jid: c.chatJid,
+      chatJid: canonicalJid,
+      jid: canonicalJid,
       type: c.isGroup ? 'group' : 'contact',
-      label: `${c.isGroup ? '👥' : '👤'} ${displayNameForJid(c.chatJid)}`
-    }));
+      label: `${c.isGroup ? '👥' : '👤'} ${displayNameForJid(canonicalJid)}`
+    }});
+
+    const merged = new Map();
+    for (const c of chats) {
+      const key = String(c?.jid || '').trim();
+      if (!key) continue;
+      const prev = merged.get(key);
+      if (!prev) {
+        merged.set(key, c);
+        continue;
+      }
+      merged.set(key, {
+        ...prev,
+        ...c,
+        count: Math.max(Number(prev.count || 0), Number(c.count || 0)),
+        lastTs: Math.max(Number(prev.lastTs || 0), Number(c.lastTs || 0)),
+        lastText: Number(c.lastTs || 0) >= Number(prev.lastTs || 0) ? c.lastText : prev.lastText,
+        lastSenderJid: Number(c.lastTs || 0) >= Number(prev.lastTs || 0) ? c.lastSenderJid : prev.lastSenderJid,
+      });
+    }
+    chats = Array.from(merged.values());
     
     renderChats();
   } catch (e) {
@@ -1102,7 +1173,7 @@ function scheduleActiveChatRefresh(chatJid) {
 }
 
 function applyChatSummaryUpdate(summary) {
-  const jid = String(summary?.chatJid || '').trim();
+  const jid = canonicalizeChatJidForUi(summary?.chatJid || '');
   if (!jid) return;
 
   const next = {
@@ -1151,7 +1222,7 @@ function connectMessagesStream() {
   messagesES.addEventListener('message-update', (evt) => {
     try {
       const data = JSON.parse(evt.data || '{}');
-      const chatJid = String(data?.chatJid || '').trim();
+      const chatJid = canonicalizeChatJidForUi(data?.chatJid || '');
       if (!chatJid) return;
       const isIncoming = String(data?.message?.direction || '').trim() === 'in';
       if (isIncoming) {
@@ -1216,7 +1287,8 @@ async function selectChat(selectedJid = '') {
 
 async function loadChatMessages(jid, silent = false) {
   try {
-    const data = await api(`/admin/messages/chat/${encodeURIComponent(jid)}?limit=${CHAT_FETCH_LIMIT}`);
+    const limit = Math.min(Math.max(Number(chatFetchLimit || 500), 50), 2000);
+    const data = await api(`/admin/messages/chat/${encodeURIComponent(jid)}?limit=${limit}`);
     const log = document.getElementById('chatLog');
     const msgs = (data.messages || []).slice(-CHAT_RENDER_LIMIT);
     const nextFingerprint = chatMessagesFingerprint(msgs);
@@ -1225,14 +1297,21 @@ async function loadChatMessages(jid, silent = false) {
 
     if (nextFingerprint === prevFingerprint) {
       activeChatMessages = msgs;
+      const hasRenderedMessages = Boolean(log && log.querySelector('.msg'));
       if (!msgs.length) {
         renderEmptyChatState(log);
       }
+      if (msgs.length && !hasRenderedMessages) {
+        // The fingerprint can be unchanged when re-opening a chat, but the UI
+        // may have been reset to empty while switching chats.
+        // In that case we must continue to the full render path below.
+      } else {
       updateQuoteHints();
       if (hadBottomLock) scrollChatLogToBottom(log);
       markChatAsRead(jid, msgs);
       renderChats();
       return;
+      }
     }
 
     chatRenderToken += 1;
@@ -1321,8 +1400,14 @@ async function loadChatMessages(jid, silent = false) {
 
       const div = document.createElement('div');
       div.className = `msg ${m.direction}`;
-      const time = new Date(m.ts).toLocaleTimeString();
-      const status = m.direction === 'out' ? (m.status || 'queued') : 'received';
+      const rawTs = Number(m?.ts || 0);
+      const dateObj = rawTs > 0 ? new Date(rawTs) : null;
+      const isValidDate = Boolean(dateObj) && Number.isFinite(dateObj.getTime());
+      const time = isValidDate
+        ? dateObj.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })
+        : 'Unknown time';
+      const directionLabel = m.direction === 'out' ? 'Sent' : 'Received';
+      const status = m.direction === 'out' ? (m.status || 'queued') : (m.status || 'received');
       const senderName = m.direction === 'out' ? 'You' : displayNameForJid(m.senderJid || m.chatJid);
       const showSender = Boolean(senderName) && (Boolean(m.isGroup) || m.direction === 'in');
       const mediaLink = mediaMarkupFor(m);
@@ -1330,11 +1415,14 @@ async function loadChatMessages(jid, silent = false) {
       const previewSlot = firstUrl
         ? `<div class="msg-link-preview-slot" data-url="${encodeURIComponent(firstUrl)}"><span class="ops-muted">Loading preview…</span></div>`
         : '';
+      const deletedHint = status === 'deleted'
+        ? '<div class="ops-muted" style="margin-top:6px;font-size:11px;">Deleted on sender side</div>'
+        : '';
       const quoteBtn = (m.direction === 'in' && m.id)
         ? `<div class="msg-actions"><button class="btn-ghost" type="button" onclick="setSelectedQuote('${esc(m.id)}')">Quote</button></div>`
         : '';
       const senderLine = showSender ? `<div class="msg-sender">${esc(senderName)}</div>` : '';
-      div.innerHTML = `${senderLine}<div style="white-space:pre-wrap;word-break:break-word;">${esc(m.text || `[${m.type || 'message'}]`).replace(/\n/g,'<br>')}</div>${previewSlot}${mediaLink}<div class="msg-time">${time} <span class="badge ${status}">${status}</span></div>${quoteBtn}`;
+      div.innerHTML = `${senderLine}<div style="white-space:pre-wrap;word-break:break-word;">${esc(m.text || `[${m.type || 'message'}]`).replace(/\n/g,'<br>')}</div>${deletedHint}${previewSlot}${mediaLink}<div class="msg-time">${directionLabel}: ${time} <span class="badge ${status}">${status}</span></div>${quoteBtn}`;
       fragment.appendChild(div);
     }
 
@@ -1831,41 +1919,206 @@ function clearSend() {
 
 // PAIRING
 let pairingES = null;
+let pairingQrPollTimer = null;
+let pairingQrPollRemaining = 0;
+let pairingRelinkBusy = false;
+let pairingQrUpdatedAt = 0;
+let pairingQrRequestInFlight = false;
+let pairingLastQrRequestKey = '';
+let pairingLastQrLoadedKey = '';
+let pairingStatusState = { status: 'unknown', hasQR: false, relinking: false, qrUpdatedAt: 0 };
+
+function setPairingQrImage(src) {
+  const img = document.getElementById('qrImage');
+  if (!img || !src) return;
+  img.src = src;
+}
+
+function stopPairingQrPolling() {
+  if (!pairingQrPollTimer) return;
+  clearTimeout(pairingQrPollTimer);
+  pairingQrPollTimer = null;
+  pairingQrPollRemaining = 0;
+}
+
+function startPairingQrPolling({ attempts = 20, intervalMs = 2500, immediate = true } = {}) {
+  stopPairingQrPolling();
+  pairingQrPollRemaining = Math.max(1, Number(attempts || 0));
+
+  const tick = () => {
+    refreshQr({ quiet: true });
+    pairingQrPollRemaining -= 1;
+    if (pairingQrPollRemaining <= 0) {
+      pairingQrPollTimer = null;
+      return;
+    }
+    pairingQrPollTimer = setTimeout(tick, Math.max(250, Number(intervalMs || 2500)));
+  };
+
+  if (immediate) tick();
+  else pairingQrPollTimer = setTimeout(tick, Math.max(250, Number(intervalMs || 2500)));
+}
+
+function updatePairingStatusUi(data = {}) {
+  const prevStatus = String(pairingStatusState?.status || 'unknown');
+
+  pairingStatusState = {
+    status: String(data.status || pairingStatusState.status || 'unknown'),
+    hasQR: Boolean(data.hasQR),
+    relinking: Boolean(data.relinking),
+    qrUpdatedAt: Number(data.qrUpdatedAt || pairingStatusState.qrUpdatedAt || 0)
+  };
+
+  pairingQrUpdatedAt = pairingStatusState.qrUpdatedAt;
+
+  const parts = [`Status: ${pairingStatusState.status}`];
+  if (pairingStatusState.relinking) parts.push('re-pair in progress');
+  if (pairingStatusState.hasQR) parts.push('QR Ready');
+  const statusEl = document.getElementById('pairingStatus');
+  if (statusEl) statusEl.textContent = parts.join(' • ');
+
+  // Once WA opens (especially after fresh pair), refresh data panels immediately.
+  if (pairingStatusState.status === 'open' && prevStatus !== 'open') {
+    loadChats().catch(() => {});
+    loadContacts().catch(() => {});
+    loadGroups().catch(() => {});
+  }
+}
 
 function connectPairingStream() {
   if (pairingES) return;
-  
-  pairingES = new EventSource('/pairing/stream');
-  
+
+  pairingES = new EventSource('/admin/pairing/stream');
+
   pairingES.addEventListener('status', (e) => {
     try {
       const data = JSON.parse(e.data || '{}');
-      document.getElementById('pairingStatus').textContent = `Status: ${data.status || 'unknown'}${data.hasQR ? ' • QR Ready' : ''}`;
-      if (data.hasQR) refreshQr();
+      updatePairingStatusUi(data);
+      if (data.status === 'open') {
+        stopPairingQrPolling();
+        return;
+      }
+
+      if (data.hasQR) {
+        refreshQr({ quiet: true });
+      }
     } catch {}
   });
-  
-  pairingES.addEventListener('qr', () => {
-    refreshQr();
+
+  pairingES.addEventListener('qr', (e) => {
+    try {
+      const data = JSON.parse(e.data || '{}');
+      if (data && typeof data === 'object') {
+        pairingQrUpdatedAt = Number(data.qrUpdatedAt || Date.now());
+        updatePairingStatusUi({ ...pairingStatusState, hasQR: true, qrUpdatedAt: pairingQrUpdatedAt });
+        if (data.qrDataUrl) {
+          const dataUrl = String(data.qrDataUrl || '');
+          if (dataUrl.startsWith('data:image/')) {
+            const img = document.getElementById('qrImage');
+            if (img) {
+              const fallbackVersion = String(pairingQrUpdatedAt || Date.now());
+              img.onload = () => {
+                pairingQrRequestInFlight = false;
+                pairingLastQrRequestKey = fallbackVersion;
+                pairingLastQrLoadedKey = fallbackVersion;
+                img.dataset.qrReady = '1';
+              };
+              img.onerror = () => {
+                pairingQrRequestInFlight = false;
+                img.dataset.qrReady = '0';
+                setPairingQrImage(`/admin/pairing/qr.png?v=${encodeURIComponent(fallbackVersion)}&t=${Date.now()}`);
+              };
+              setPairingQrImage(dataUrl);
+              return;
+            }
+          }
+        }
+      }
+    } catch {}
+    refreshQr({ quiet: true });
   });
-  
+
   pairingES.onerror = () => {
+    try { pairingES?.close?.(); } catch {}
     pairingES = null;
     setTimeout(() => connectPairingStream(), 2000);
   };
 }
 
-function refreshQr() {
+async function refreshQr(options = {}) {
+  const { quiet = false } = options || {};
   const img = document.getElementById('qrImage');
-  if (img) img.src = `/pairing/qr.png?t=${Date.now()}`;
+  if (!img) return;
+
+  const force = Boolean(options && options.force);
+  const hasVersion = Number(pairingQrUpdatedAt || 0) > 0;
+  const qrVersion = hasVersion
+    ? Number(pairingQrUpdatedAt)
+    : Math.floor(Date.now() / 15000) * 15000;
+  const requestKey = String(qrVersion);
+
+  if (!force && pairingQrRequestInFlight && pairingLastQrRequestKey === requestKey) {
+    return;
+  }
+  if (!force && pairingLastQrLoadedKey === requestKey) {
+    return;
+  }
+
+  pairingQrRequestInFlight = true;
+  pairingLastQrRequestKey = requestKey;
+  img.onload = () => {
+    pairingQrRequestInFlight = false;
+    pairingLastQrLoadedKey = requestKey;
+    img.dataset.qrReady = '1';
+  };
+  img.onerror = () => {
+    pairingQrRequestInFlight = false;
+    img.dataset.qrReady = '0';
+    if (!quiet) toast('QR not ready yet', false);
+  };
+  const bust = force ? `&t=${Date.now()}` : '';
+  setPairingQrImage(`/admin/pairing/qr.png?v=${encodeURIComponent(requestKey)}${bust}`);
 }
 
-async function forceRelink() {
+function manualRefreshQr() {
+  if (pairingStatusState.hasQR) {
+    refreshQr({ quiet: false, force: true });
+    return;
+  }
+  if (pairingStatusState.status === 'connecting' || pairingStatusState.status === 'relinking' || pairingStatusState.relinking) {
+    refreshQr({ quiet: true, force: true });
+    toast('Waiting for latest QR…', true);
+    return;
+  }
+  forceRelink({ silentSuccess: true, source: 'refresh-qr' });
+}
+
+async function forceRelink(options = {}) {
+  const { silentSuccess = false, source = 'force-relink' } = options || {};
+  if (pairingRelinkBusy) {
+    refreshQr({ quiet: true, force: true });
+    toast('Waiting for latest QR…', true);
+    return;
+  }
+
   try {
+    pairingRelinkBusy = true;
+    const statusEl = document.getElementById('pairingStatus');
+    if (statusEl) statusEl.textContent = source === 'refresh-qr'
+      ? 'Status: relinking • requesting fresh QR…'
+      : 'Status: relinking • waiting for QR…';
     await api('/admin/force-relink', { method: 'POST' });
-    toast('Relink requested', true);
+    refreshQr({ quiet: true, force: true });
+    if (!silentSuccess) toast('Re-pair requested', true);
   } catch (e) {
-    toast(e.message, false);
+    if (String(e?.message || '').toLowerCase().includes('already in progress')) {
+      refreshQr({ quiet: true, force: true });
+      toast('Waiting for latest QR…', true);
+    } else {
+      toast(e.message, false);
+    }
+  } finally {
+    pairingRelinkBusy = false;
   }
 }
 
@@ -1879,6 +2132,7 @@ async function loadContacts() {
       if (!stillExists) resetContactForm();
     }
     updateRecipientTagOptions();
+    syncRuleDmFilterPicker();
     renderContactMergeOptions();
     renderContactsList();
   } catch (e) {
@@ -1918,6 +2172,35 @@ function contactPhoneDisplay(c) {
   if (!jid || !jid.includes('@')) return '';
   const userPart = jid.split('@')[0] || '';
   return /^\d{9,15}$/.test(userPart) ? localMsisdnFromAny(userPart) : '';
+}
+
+function contactMatchesQuery(contact, queryRaw) {
+  const q = String(queryRaw || '').trim().toLowerCase();
+  if (!q) return true;
+  const tags = Array.isArray(contact?.tags) ? contact.tags.map(t => String(t || '').trim()).filter(Boolean).join(' ') : '';
+  const aliases = Array.isArray(contact?.aliasJids) ? contact.aliasJids.join(' ') : '';
+  const haystack = [
+    String(contact?.name || ''),
+    String(contact?.jid || ''),
+    String(contact?.msisdn || ''),
+    String(contact?.msisdnIntl || ''),
+    String(contactPhoneDisplay(contact) || ''),
+    aliases,
+    tags
+  ].join(' ').toLowerCase();
+  return haystack.includes(q);
+}
+
+function getFilteredSortedContacts() {
+  const q = String(contactsSearchQuery || '').trim();
+  return [...(contacts || [])]
+    .sort((a, b) => String(a?.name || '').localeCompare(String(b?.name || ''), undefined, { sensitivity: 'base' }))
+    .filter(c => contactMatchesQuery(c, q));
+}
+
+function filterContactsList() {
+  contactsSearchQuery = String(document.getElementById('contactsSearch')?.value || '').trim();
+  renderContactsList();
 }
 
 function applyContactFormMode() {
@@ -2036,8 +2319,16 @@ function renderLikelyDuplicateContacts() {
 function renderContactsList() {
   const list = document.getElementById('contactsList');
   list.innerHTML = '';
-  
-  for (const c of contacts) {
+  const rows = getFilteredSortedContacts();
+
+  if (!rows.length) {
+    const empty = document.createElement('div');
+    empty.className = 'ops-muted';
+    empty.textContent = contactsSearchQuery ? 'No contacts match your search.' : 'No contacts yet.';
+    list.appendChild(empty);
+  }
+
+  for (const c of rows) {
     const item = document.createElement('div');
     item.className = 'list-item';
     item.innerHTML = `<div class="list-item-text"><div class="list-item-main">${esc(c.name)}</div><div class="list-item-sub">${esc(contactIdentifierSummary(c))}</div></div>`;
@@ -2325,16 +2616,169 @@ function updateRuleMatchDisplay() {
   box.style.display = match === 'any' ? 'none' : 'block';
 }
 
+function updateRuleDmFilterDisplay() {
+  const mode = String(document.getElementById('ruleDmFilterMode')?.value || 'all');
+  const box = document.getElementById('ruleDmFilterBox');
+  if (!box) return;
+  box.style.display = mode === 'all' ? 'none' : 'block';
+  if (mode !== 'all') syncRuleDmFilterPicker();
+}
+
+function getRuleDmFilterManualValues() {
+  return ruleDmFilterSenders.map(s => s.value);
+}
+
+function contactLabelForValue(value) {
+  const v = String(value || '').trim();
+  if (!v) return v;
+  const c = contacts.find(ct => ruleDmFilterCandidateValue(ct) === v);
+  if (c) return String(c?.name || '').trim() || v;
+  return v;
+}
+
+function setRuleDmFilterManualValues(values) {
+  const deduped = [...new Set((values || []).map(v => String(v || '').trim()).filter(Boolean))];
+  ruleDmFilterSenders = deduped.map(v => ({ label: contactLabelForValue(v), value: v }));
+  renderRuleDmFilterChips();
+}
+
+function addRuleDmFilterSender(label, value) {
+  const v = String(value || '').trim();
+  if (!v) return;
+  if (ruleDmFilterSenders.find(s => s.value === v)) return;
+  ruleDmFilterSenders.push({ label: String(label || v), value: v });
+  renderRuleDmFilterChips();
+  syncRuleDmFilterPicker();
+}
+
+function removeRuleDmFilterSender(value) {
+  ruleDmFilterSenders = ruleDmFilterSenders.filter(s => s.value !== value);
+  renderRuleDmFilterChips();
+  syncRuleDmFilterPicker();
+}
+
+function renderRuleDmFilterChips() {
+  const el = document.getElementById('ruleDmFilterChips');
+  if (!el) return;
+  el.innerHTML = '';
+  if (!ruleDmFilterSenders.length) {
+    const empty = document.createElement('span');
+    empty.className = 'ops-muted';
+    empty.style.fontSize = '12px';
+    empty.textContent = 'No senders selected';
+    el.appendChild(empty);
+    return;
+  }
+  for (const s of ruleDmFilterSenders) {
+    const chip = document.createElement('span');
+    chip.className = 'recipient-chip';
+    chip.append(document.createTextNode(String(s.label || s.value)));
+    const btn = document.createElement('button');
+    btn.className = 'chip-remove';
+    btn.type = 'button';
+    btn.title = `Remove ${s.label || s.value}`;
+    btn.textContent = '×';
+    btn.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      removeRuleDmFilterSender(s.value);
+    });
+    chip.appendChild(btn);
+    el.appendChild(chip);
+  }
+}
+
+function ruleDmFilterCandidateValue(c) {
+  const jid = String(c?.jid || '').trim();
+  if (jid) return jid;
+  const intl = String(c?.msisdnIntl || '').trim();
+  if (intl) return intl;
+  const msisdn = String(c?.msisdn || '').trim();
+  if (msisdn) return msisdn;
+  return String(c?.name || '').trim();
+}
+
+function syncRuleDmFilterPicker() {
+  const list = document.getElementById('ruleDmFilterPickList');
+  if (!list) return;
+
+  const q = String(document.getElementById('ruleDmFilterSearch')?.value || '').trim().toLowerCase();
+  const selected = new Set(getRuleDmFilterManualValues().map(v => v.toLowerCase()));
+
+  const rows = [...(contacts || [])]
+    .sort((a, b) => String(a?.name || '').localeCompare(String(b?.name || ''), undefined, { sensitivity: 'base' }))
+    .filter(c => {
+      const value = ruleDmFilterCandidateValue(c);
+      const summary = contactIdentifierSummary(c);
+      const hay = `${String(c?.name || '')} ${summary} ${value}`.toLowerCase();
+      return !q || hay.includes(q);
+    });
+
+  list.innerHTML = '';
+  for (const c of rows) {
+    const value = ruleDmFilterCandidateValue(c);
+    if (!value) continue;
+    const name = String(c?.name || '').trim() || value;
+    const summary = contactIdentifierSummary(c);
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = summary ? `${name} — ${summary}` : name;
+    if (selected.has(String(value).toLowerCase())) option.disabled = true;
+    list.appendChild(option);
+  }
+
+  if (!list.options.length) {
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = 'No matching contacts';
+    option.disabled = true;
+    list.appendChild(option);
+  }
+}
+
+function addSelectedSendersToRuleList() {
+  const list = document.getElementById('ruleDmFilterPickList');
+  if (!list) return;
+  const picked = Array.from(list.selectedOptions || [])
+    .filter(o => !o.disabled)
+    .map(o => String(o.value || '').trim())
+    .filter(Boolean);
+  if (!picked.length) {
+    toast('Select sender(s) to add', false);
+    return;
+  }
+  for (const value of picked) {
+    addRuleDmFilterSender(contactLabelForValue(value), value);
+  }
+}
+
+function addAllFilteredSendersToRuleList() {
+  const list = document.getElementById('ruleDmFilterPickList');
+  if (!list) return;
+  const picked = Array.from(list.options || [])
+    .filter(o => !o.disabled)
+    .map(o => String(o.value || '').trim())
+    .filter(Boolean);
+  if (!picked.length) return;
+  for (const value of picked) {
+    addRuleDmFilterSender(contactLabelForValue(value), value);
+  }
+}
+
 function resetRuleForm() {
   editingRuleId = '';
   document.getElementById('ruleId').value = '';
   document.getElementById('ruleEnabled').value = 'true';
   document.getElementById('ruleTrigger').value = 'text';
   document.getElementById('ruleScope').value = 'both';
+  document.getElementById('ruleDmFilterMode').value = 'all';
+  document.getElementById('ruleDmFilterSearch').value = '';
+  ruleDmFilterSenders = [];
+  renderRuleDmFilterChips();
   document.getElementById('ruleMatch').value = 'contains';
   document.getElementById('ruleKeyword').value = '';
   document.getElementById('ruleReply').value = '';
   document.getElementById('ruleFormMode').textContent = 'Creating a new rule';
+  updateRuleDmFilterDisplay();
   updateRuleMatchDisplay();
 }
 
@@ -2346,10 +2790,14 @@ function editRule(id) {
   document.getElementById('ruleEnabled').value = String(rule.enabled !== false);
   document.getElementById('ruleTrigger').value = rule.triggerType || 'text';
   document.getElementById('ruleScope').value = rule.scope || 'both';
+  document.getElementById('ruleDmFilterMode').value = rule.dmFilterMode || 'all';
+  document.getElementById('ruleDmFilterSearch').value = '';
+  setRuleDmFilterManualValues(Array.isArray(rule.dmFilterValues) ? rule.dmFilterValues : []);
   document.getElementById('ruleMatch').value = rule.matchType || 'contains';
   document.getElementById('ruleKeyword').value = rule.matchValue || '';
   document.getElementById('ruleReply').value = rule.replyText || '';
   document.getElementById('ruleFormMode').textContent = `Editing rule: ${rule.name || rule.id}`;
+  updateRuleDmFilterDisplay();
   updateRuleMatchDisplay();
 }
 
@@ -2358,6 +2806,7 @@ async function loadRules() {
     const data = await api('/admin/rules');
     const cfg = data.rulesConfig || {};
     rules = cfg.rules || [];
+    if (!contacts.length) loadContacts().catch(() => {});
     renderRulesList();
     if (!editingRuleId) resetRuleForm();
   } catch (e) {
@@ -2370,9 +2819,15 @@ function renderRulesList() {
   list.innerHTML = '';
   
   for (const r of rules) {
+    const dmMode = String(r.dmFilterMode || 'all');
+    const dmValues = Array.isArray(r.dmFilterValues) ? r.dmFilterValues : [];
+    const dmLabels = dmValues.map(v => contactLabelForValue(v));
+    const dmSummary = dmMode === 'include'
+      ? `DM include: ${dmLabels.length ? dmLabels.join(', ') : '(none)'}`
+      : (dmMode === 'exclude' ? `DM exclude: ${dmLabels.length ? dmLabels.join(', ') : '(none)'}` : 'DM all');
     const item = document.createElement('div');
     item.className = 'list-item';
-    item.innerHTML = `<div class="list-item-text"><div class="list-item-main">${r.triggerType}: "${esc(r.matchValue || 'any')}"</div><div class="list-item-sub">→ ${esc(r.replyText.slice(0, 50))}</div></div>`;
+    item.innerHTML = `<div class="list-item-text"><div class="list-item-main">${r.triggerType}: "${esc(r.matchValue || 'any')}"</div><div class="list-item-sub">${esc(dmSummary)} • → ${esc(r.replyText.slice(0, 50))}</div></div>`;
     
     const del = document.createElement('button');
     del.className = 'btn-danger';
@@ -2393,6 +2848,8 @@ function renderRulesList() {
 async function saveRule() {
   const trigger = document.getElementById('ruleTrigger').value;
   const scope = document.getElementById('ruleScope').value;
+  const dmFilterMode = document.getElementById('ruleDmFilterMode').value;
+  const dmFilterValues = getRuleDmFilterManualValues();
   const match = document.getElementById('ruleMatch').value;
   const keyword = document.getElementById('ruleKeyword').value.trim();
   const reply = document.getElementById('ruleReply').value.trim();
@@ -2414,6 +2871,8 @@ async function saveRule() {
         matchType: match,
         matchValue: keyword,
         scope,
+        dmFilterMode,
+        dmFilterValues,
         enabled,
         replyText: reply
       })
@@ -2986,12 +3445,22 @@ async function loadRuntimeSettings(silent = false) {
     const auto = runtimeSettings.autoReply || {};
     const queue = runtimeSettings.queue || {};
     const rateLimit = runtimeSettings.rateLimit || {};
+    const apiToggles = runtimeSettings.api || {};
+    const messages = runtimeSettings.messages || {};
     const media = runtimeSettings.media || {};
 
     const enabledEl = document.getElementById('opsAutoReplyEnabled');
     if (!enabledEl) return runtimeSettings;
 
     enabledEl.checked = Boolean(auto.enabled);
+    const apiEnabled = document.getElementById('opsApiEnabled');
+    if (apiEnabled) apiEnabled.checked = apiToggles.enabled !== false;
+    const apiText = document.getElementById('opsApiSendTextEnabled');
+    if (apiText) apiText.checked = apiToggles.sendTextEnabled !== false;
+    const apiImage = document.getElementById('opsApiSendImageEnabled');
+    if (apiImage) apiImage.checked = apiToggles.sendImageEnabled !== false;
+    const apiDocument = document.getElementById('opsApiSendDocumentEnabled');
+    if (apiDocument) apiDocument.checked = apiToggles.sendDocumentEnabled !== false;
     document.getElementById('opsAutoReplyScope').value = auto.scope || 'both';
     document.getElementById('opsAutoReplyMatchType').value = auto.matchType || 'contains';
     document.getElementById('opsAutoReplyMatchValue').value = String(auto.matchValue || '');
@@ -3020,7 +3489,11 @@ async function loadRuntimeSettings(silent = false) {
     if (quietTz) quietTz.value = String(quiet.tz || 'Africa/Johannesburg');
     setNum('opsRateLimitWindowMs', rateLimit.windowMs);
     setNum('opsRateLimitMax', rateLimit.max);
+    setNum('opsMessagesUiFetchLimit', messages.uiFetchLimit || 500);
+    setNum('opsMessagesPersistMax', messages.persistMax || 0);
     setNum('opsMediaUrlTtlSeconds', media.urlTtlSeconds);
+    setNum('opsMediaRetentionDays', media.retentionDays || 7);
+    chatFetchLimit = Math.min(Math.max(Number(messages.uiFetchLimit || 500), 50), 2000);
     const metaEl = document.getElementById('opsRuntimeMeta');
     if (metaEl) metaEl.textContent = formatSettingsMeta(runtimeSettings.lastSavedBy, runtimeSettings.updatedAt);
     return runtimeSettings;
@@ -3060,8 +3533,19 @@ async function saveRuntimeSettings() {
         windowMs: Number(document.getElementById('opsRateLimitWindowMs')?.value || 0),
         max: Number(document.getElementById('opsRateLimitMax')?.value || 0)
       },
+      api: {
+        enabled: Boolean(document.getElementById('opsApiEnabled')?.checked),
+        sendTextEnabled: Boolean(document.getElementById('opsApiSendTextEnabled')?.checked),
+        sendImageEnabled: Boolean(document.getElementById('opsApiSendImageEnabled')?.checked),
+        sendDocumentEnabled: Boolean(document.getElementById('opsApiSendDocumentEnabled')?.checked)
+      },
+      messages: {
+        uiFetchLimit: Number(document.getElementById('opsMessagesUiFetchLimit')?.value || 500),
+        persistMax: Number(document.getElementById('opsMessagesPersistMax')?.value || 0)
+      },
       media: {
-        urlTtlSeconds: Number(document.getElementById('opsMediaUrlTtlSeconds')?.value || 0)
+        urlTtlSeconds: Number(document.getElementById('opsMediaUrlTtlSeconds')?.value || 0),
+        retentionDays: Number(document.getElementById('opsMediaRetentionDays')?.value || 7)
       }
     };
 

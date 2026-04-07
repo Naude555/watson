@@ -12,13 +12,23 @@ import crypto from 'crypto'
 import { fileURLToPath } from 'url'
 import BullMQ from 'bullmq'
 const { Queue, Worker, QueueEvents } = BullMQ
+import pg from 'pg'
+const { Pool } = pg
+import Database from 'better-sqlite3'
+import { loadChatSummariesFromDb } from './lib/chat-summaries.js'
+import { createDiagnosticsBuffer } from './lib/diagnostics.js'
+import { parseDisconnectDetails, computeReconnectDelayMs, computeStatus405DelayMs } from './lib/wa-reconnect.js'
+import { createRequestTracingMiddleware } from './lib/request-tracing.js'
+import { registerAdminDebugRoutes } from './lib/admin-debug-routes.js'
+import { registerAdminMiddlewares } from './lib/admin-middleware.js'
 
 import IORedis from 'ioredis'
 import makeWASocket, {
   Browsers,
   DisconnectReason,
   fetchLatestBaileysVersion,
-  useMultiFileAuthState,
+  initAuthCreds,
+  BufferJSON,
   downloadMediaMessage
 } from '@whiskeysockets/baileys'
 
@@ -67,9 +77,7 @@ const ADMIN_SESSION_TTL_SEC = Number(process.env.ADMIN_SESSION_TTL_SEC || 60 * 6
 const ADMIN_SESSION_SECRET = String(process.env.ADMIN_SESSION_SECRET || ADMIN_KEY || 'wa-admin-session-secret').trim()
 const ADMIN_CSRF_COOKIE = String(process.env.ADMIN_CSRF_COOKIE || 'wa_admin_csrf').trim()
 const ADMIN_IP_ALLOWLIST = String(process.env.ADMIN_IP_ALLOWLIST || '').split(',').map(s => s.trim()).filter(Boolean)
-const ADMIN_AUDIT_FILE = String(process.env.ADMIN_AUDIT_FILE || '/data/admin_audit.json').trim()
 const ADMIN_AUDIT_MAX_ITEMS = Math.max(200, Number(process.env.ADMIN_AUDIT_MAX_ITEMS || 5000))
-const BOARDS_FILE = process.env.BOARDS_FILE || '/data/boards.json'
 const WA_BROWSER_PROFILE = String(process.env.WA_BROWSER_PROFILE || 'macos').trim().toLowerCase()
 
 const ADMIN_ROLE_LEVEL = { viewer: 1, operator: 2, admin: 3 }
@@ -112,16 +120,37 @@ function requiredRoleForAdminRequest(req) {
   return 'operator'
 }
 
-// Files
-const CONTACTS_FILE = process.env.CONTACTS_FILE || '/data/contacts.json'
-const AUTH_DIR = process.env.AUTH_DIR || './auth'
+// Auth
+const AUTH_CREDS_DB_KEY = 'wa_auth_creds_v1'
 
-// IMPORTANT: persistent message store (JSON) (survives container rebuilds if /data mounted)
-const MESSAGES_STORE_FILE = process.env.MESSAGES_FILE || '/data/messages.json'
-const MESSAGES_MAX = Number(process.env.MESSAGES_MAX || 20000)
+// Storage backend
+const PG_HOST = String(process.env.PG_HOST || process.env.POSTGRES_HOST || '').trim()
+const PG_PORT = Number(process.env.PG_PORT || process.env.POSTGRES_PORT || 5432)
+const PG_DATABASE = String(process.env.PG_DATABASE || process.env.POSTGRES_DB || '').trim()
+const PG_USER = String(process.env.PG_USER || process.env.POSTGRES_USER || '').trim()
+const PG_PASSWORD = String(process.env.PG_PASSWORD || process.env.POSTGRES_PASSWORD || '').trim()
+const PG_POOL_MAX = Math.max(1, Number(process.env.PG_POOL_MAX || 10))
+const PG_CONNECTION_TIMEOUT_MS = Math.max(1000, Number(process.env.PG_CONNECTION_TIMEOUT_MS || 10000))
+const DATABASE_URL = String(process.env.DATABASE_URL || '').trim()
+const SQLITE_FILE = String(process.env.SQLITE_FILE || '/data/watson.sqlite').trim()
+const HAS_PG_CONFIG = Boolean(DATABASE_URL) || Boolean(PG_HOST && PG_DATABASE)
+const STORAGE_BACKEND = String(process.env.STORAGE_BACKEND || (HAS_PG_CONFIG ? 'postgres' : 'sqlite')).trim().toLowerCase()
+const USE_POSTGRES = STORAGE_BACKEND === 'postgres' && HAS_PG_CONFIG
+const PG_SSL = String(process.env.PG_SSL || '').trim().toLowerCase() === 'true'
 
 // In-memory UI cache (fast polling)
 const MESSAGES_MEMORY_LIMIT = Number(process.env.MESSAGES_MEMORY_LIMIT || 1500)
+const DIAG_EVENT_BUFFER_SIZE = Number(process.env.DIAG_EVENT_BUFFER_SIZE || 600)
+const diag = createDiagnosticsBuffer(DIAG_EVENT_BUFFER_SIZE)
+
+function logDiag(level, event, message, meta = null) {
+  diag.push({ level, event, message, meta })
+  if (meta && typeof meta === 'object') {
+    console.log(message, meta)
+  } else {
+    console.log(message)
+  }
+}
 
 // Uploads
 const UPLOAD_DIR = process.env.UPLOAD_DIR || './uploads'
@@ -143,14 +172,8 @@ const AUTO_REPLY_GROUP_PREFIX_DEFAULT = process.env.AUTO_REPLY_GROUP_PREFIX || '
 const lastAutoReplyAt = new Map()
 
 // ----------------------------
-// n8n Automations (simple, file-backed)
+// n8n Automations
 // ----------------------------
-const AUTOMATIONS_FILE = process.env.AUTOMATIONS_FILE || '/data/automations.json'
-const RULES_FILE = process.env.RULES_FILE || '/data/rules.json'
-const TEMPLATES_FILE = process.env.TEMPLATES_FILE || '/data/templates.json'
-const RUNTIME_SETTINGS_FILE = process.env.RUNTIME_SETTINGS_FILE || '/data/runtime_settings.json'
-const SCHEDULES_FILE = process.env.SCHEDULES_FILE || '/data/schedules.json'
-const N8N_DEAD_LETTERS_FILE = process.env.N8N_DEAD_LETTERS_FILE || '/data/n8n_dead_letters.json'
 const N8N_WEBHOOK_URL_DEFAULT = String(process.env.N8N_WEBHOOK_URL || '').trim()
 const N8N_SHARED_SECRET_DEFAULT = String(process.env.N8N_SHARED_SECRET || '').trim()
 const SCHEDULE_POLL_MS = Number(process.env.SCHEDULE_POLL_MS || 5000)
@@ -166,6 +189,11 @@ const RETRY_BACKOFF_MS_DEFAULT = Number(process.env.WA_RETRY_BACKOFF_MS || 1500)
 // Rate limit (non-admin, non-pairing)
 const RATE_LIMIT_WINDOW_MS_DEFAULT = Number(process.env.RATE_LIMIT_WINDOW_MS || 60000)
 const RATE_LIMIT_MAX_DEFAULT = Number(process.env.RATE_LIMIT_MAX || 120)
+const API_PUBLIC_ENABLED_DEFAULT = String(process.env.API_PUBLIC_ENABLED || 'true').trim().toLowerCase() !== 'false'
+const API_SEND_TEXT_ENABLED_DEFAULT = String(process.env.API_SEND_TEXT_ENABLED || 'true').trim().toLowerCase() !== 'false'
+const API_SEND_IMAGE_ENABLED_DEFAULT = String(process.env.API_SEND_IMAGE_ENABLED || 'true').trim().toLowerCase() !== 'false'
+const API_SEND_DOCUMENT_ENABLED_DEFAULT = String(process.env.API_SEND_DOCUMENT_ENABLED || 'true').trim().toLowerCase() !== 'false'
+const WA_HISTORY_SYNC_MAX = Number(process.env.WA_HISTORY_SYNC_MAX || 15000)
 
 // ESM __dirname equivalent
 const __filename = fileURLToPath(import.meta.url)
@@ -294,50 +322,894 @@ function defaultRuntimeSettings() {
       windowMs: RATE_LIMIT_WINDOW_MS_DEFAULT,
       max: RATE_LIMIT_MAX_DEFAULT
     },
+    api: {
+      enabled: API_PUBLIC_ENABLED_DEFAULT,
+      sendTextEnabled: API_SEND_TEXT_ENABLED_DEFAULT,
+      sendImageEnabled: API_SEND_IMAGE_ENABLED_DEFAULT,
+      sendDocumentEnabled: API_SEND_DOCUMENT_ENABLED_DEFAULT
+    },
+    messages: {
+      uiFetchLimit: Math.max(50, Number(process.env.MSG_UI_FETCH_LIMIT || 500)),
+      persistMax: Math.max(0, Number(process.env.MSG_PERSIST_MAX || 0))
+    },
     media: {
-      urlTtlSeconds: Number(process.env.MEDIA_URL_TTL_SECONDS || 60 * 60 * 24 * 2)
+      urlTtlSeconds: Number(process.env.MEDIA_URL_TTL_SECONDS || 60 * 60 * 24 * 2),
+      retentionDays: Math.max(1, Number(process.env.MEDIA_RETENTION_DAYS || 7))
     },
     updatedAt: Date.now(),
     lastSavedBy: 'startup-defaults'
   }
 }
 
-function readJsonFileSafe(filePath, fallback) {
-  try {
-    if (!fs.existsSync(filePath)) return fallback
-    const raw = fs.readFileSync(filePath, 'utf8')
-    const parsed = JSON.parse(raw)
-    return parsed && typeof parsed === 'object' ? parsed : fallback
-  } catch {
-    return fallback
+let pgPool = null
+let sqliteDb = null
+let waAuthCreds = null
+
+function activeStorageBackend() {
+  if (pgPool) return 'postgres'
+  if (sqliteDb) return 'sqlite'
+  return 'json'
+}
+
+function normalizeSQLitePath(filePath) {
+  const p = String(filePath || '').trim()
+  if (!p) return '/data/watson.sqlite'
+  if (path.isAbsolute(p)) return p
+  return path.join(process.cwd(), p)
+}
+
+function buildPostgresConnectionConfig() {
+  if (DATABASE_URL) {
+    return {
+      connectionString: DATABASE_URL,
+      ssl: PG_SSL ? { rejectUnauthorized: false } : undefined,
+      max: PG_POOL_MAX,
+      connectionTimeoutMillis: PG_CONNECTION_TIMEOUT_MS
+    }
+  }
+
+  return {
+    host: PG_HOST,
+    port: PG_PORT,
+    database: PG_DATABASE,
+    user: PG_USER || undefined,
+    password: PG_PASSWORD || undefined,
+    ssl: PG_SSL ? { rejectUnauthorized: false } : undefined,
+    max: PG_POOL_MAX,
+    connectionTimeoutMillis: PG_CONNECTION_TIMEOUT_MS
   }
 }
 
-function writeJsonFileAtomic(filePath, obj) {
-  const tmp = filePath + '.tmp'
-  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2))
-  fs.renameSync(tmp, filePath)
+async function initPostgresStorage() {
+  if (!USE_POSTGRES) return false
+
+  try {
+    pgPool = new Pool(buildPostgresConnectionConfig())
+
+    await pgPool.query(`
+      CREATE TABLE IF NOT EXISTS runtime_settings (
+        id SMALLINT PRIMARY KEY,
+        settings JSONB NOT NULL,
+        updated_at BIGINT NOT NULL
+      )
+    `)
+
+    await pgPool.query(`
+      CREATE TABLE IF NOT EXISTS messages (
+        id TEXT PRIMARY KEY,
+        wa_msg_id TEXT,
+        ts BIGINT NOT NULL,
+        direction TEXT NOT NULL,
+        chat_jid TEXT NOT NULL,
+        sender_jid TEXT,
+        is_group BOOLEAN NOT NULL DEFAULT false,
+        type TEXT,
+        text_content TEXT,
+        media JSONB,
+        status TEXT,
+        status_ts BIGINT,
+        quoted_message_id TEXT
+      )
+    `)
+    await pgPool.query('CREATE INDEX IF NOT EXISTS idx_messages_chat_ts ON messages(chat_jid, ts DESC)')
+    await pgPool.query('CREATE INDEX IF NOT EXISTS idx_messages_wa_msg_id ON messages(wa_msg_id)')
+
+    await pgPool.query(`
+      CREATE TABLE IF NOT EXISTS kv_store (
+        key TEXT PRIMARY KEY,
+        value JSONB NOT NULL,
+        updated_at BIGINT NOT NULL
+      )
+    `)
+
+    await pgPool.query(`
+      CREATE TABLE IF NOT EXISTS wa_auth_keys (
+        key_type TEXT NOT NULL,
+        key_id TEXT NOT NULL,
+        value JSONB NOT NULL,
+        updated_at BIGINT NOT NULL,
+        PRIMARY KEY (key_type, key_id)
+      )
+    `)
+
+    const rtCount = await pgPool.query('SELECT COUNT(*)::int AS n FROM runtime_settings')
+    if (!Number(rtCount.rows?.[0]?.n || 0)) {
+      const seed = defaultRuntimeSettings()
+      await pgPool.query(
+        'INSERT INTO runtime_settings(id, settings, updated_at) VALUES (1, $1::jsonb, $2)',
+        [JSON.stringify(seed), Number(seed.updatedAt || Date.now())]
+      )
+    }
+
+    console.log('🗄️ PostgreSQL storage enabled (runtime settings, messages, kv_store)')
+    return true
+  } catch (e) {
+    console.warn('⚠️ Failed to initialize PostgreSQL storage:', e?.message)
+    try { await pgPool?.end?.() } catch {}
+    pgPool = null
+    return false
+  }
 }
 
-let automations = mergeDeep(defaultAutomationsConfig(), readJsonFileSafe(AUTOMATIONS_FILE, defaultAutomationsConfig()))
+function initSqliteStorage() {
+  try {
+    const sqlitePath = normalizeSQLitePath(SQLITE_FILE)
+    fs.mkdirSync(path.dirname(sqlitePath), { recursive: true })
+    sqliteDb = new Database(sqlitePath)
+    sqliteDb.exec('PRAGMA journal_mode=WAL;')
+    sqliteDb.exec('PRAGMA foreign_keys=ON;')
 
-let responseRules = readJsonFileSafe(RULES_FILE, defaultRulesConfig())
+    sqliteDb.exec(`
+      CREATE TABLE IF NOT EXISTS runtime_settings (
+        id INTEGER PRIMARY KEY,
+        settings TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS messages (
+        id TEXT PRIMARY KEY,
+        wa_msg_id TEXT,
+        ts INTEGER NOT NULL,
+        direction TEXT NOT NULL,
+        chat_jid TEXT NOT NULL,
+        sender_jid TEXT,
+        is_group INTEGER NOT NULL DEFAULT 0,
+        type TEXT,
+        text_content TEXT,
+        media TEXT,
+        status TEXT,
+        status_ts INTEGER,
+        quoted_message_id TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_messages_chat_ts ON messages(chat_jid, ts DESC);
+      CREATE INDEX IF NOT EXISTS idx_messages_wa_msg_id ON messages(wa_msg_id);
+      CREATE TABLE IF NOT EXISTS kv_store (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS wa_auth_keys (
+        key_type TEXT NOT NULL,
+        key_id TEXT NOT NULL,
+        value TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (key_type, key_id)
+      );
+    `)
 
-let runtimeSettings = readJsonFileSafe(RUNTIME_SETTINGS_FILE, defaultRuntimeSettings())
+    const rtCount = Number(sqliteDb.prepare('SELECT COUNT(*) AS n FROM runtime_settings').get()?.n || 0)
+    if (!rtCount) {
+      const seed = defaultRuntimeSettings()
+      sqliteDb.prepare('INSERT INTO runtime_settings(id, settings, updated_at) VALUES (1, ?, ?)')
+        .run(JSON.stringify(seed), Number(seed.updatedAt || Date.now()))
+    }
+
+    console.log(`🗄️ SQLite storage enabled (runtime settings, messages, kv_store) (${sqlitePath})`)
+    return true
+  } catch (e) {
+    console.warn('⚠️ Failed to initialize SQLite storage:', e?.message)
+    try { sqliteDb?.close?.() } catch {}
+    sqliteDb = null
+    return false
+  }
+}
+
+async function initDatabaseStorage() {
+  if (STORAGE_BACKEND === 'postgres' && !HAS_PG_CONFIG) {
+    console.warn('⚠️ STORAGE_BACKEND=postgres but PostgreSQL settings are missing. Falling back to SQLite.')
+  }
+
+  if (USE_POSTGRES) {
+    const ok = await initPostgresStorage()
+    if (ok) return 'postgres'
+    console.warn('⚠️ Falling back to SQLite because PostgreSQL initialization failed')
+  }
+
+  const sqliteOk = initSqliteStorage()
+  if (sqliteOk) return 'sqlite'
+  return 'json'
+}
+
+async function readRuntimeSettingsFromPostgres() {
+  if (!pgPool) return null
+  try {
+    const r = await pgPool.query('SELECT settings, updated_at FROM runtime_settings WHERE id = 1 LIMIT 1')
+    const row = r.rows?.[0]
+    if (!row) return null
+    const raw = row.settings && typeof row.settings === 'object' ? row.settings : {}
+    const merged = mergeDeep(defaultRuntimeSettings(), raw)
+    merged.updatedAt = Number(row.updated_at || raw.updatedAt || Date.now())
+    merged.lastSavedBy = String(raw.lastSavedBy || merged.lastSavedBy || 'startup-defaults')
+    return merged
+  } catch (e) {
+    console.warn('⚠️ Failed to read runtime settings from PostgreSQL:', e?.message)
+    return null
+  }
+}
+
+function readRuntimeSettingsFromSqlite() {
+  if (!sqliteDb) return null
+  try {
+    const row = sqliteDb.prepare('SELECT settings, updated_at FROM runtime_settings WHERE id = 1 LIMIT 1').get()
+    if (!row) return null
+    const raw = (() => {
+      try { return JSON.parse(String(row.settings || '{}')) } catch { return {} }
+    })()
+    const merged = mergeDeep(defaultRuntimeSettings(), raw)
+    merged.updatedAt = Number(row.updated_at || raw.updatedAt || Date.now())
+    merged.lastSavedBy = String(raw.lastSavedBy || merged.lastSavedBy || 'startup-defaults')
+    return merged
+  } catch (e) {
+    console.warn('⚠️ Failed to read runtime settings from SQLite:', e?.message)
+    return null
+  }
+}
+
+async function writeRuntimeSettingsToPostgres(settingsObj) {
+  if (!pgPool) return false
+  try {
+    const safe = mergeDeep(defaultRuntimeSettings(), settingsObj || {})
+    const updatedAt = Number(safe.updatedAt || Date.now())
+    await pgPool.query(
+      `INSERT INTO runtime_settings(id, settings, updated_at)
+       VALUES (1, $1::jsonb, $2)
+       ON CONFLICT (id) DO UPDATE SET settings = EXCLUDED.settings, updated_at = EXCLUDED.updated_at`,
+      [JSON.stringify(safe), updatedAt]
+    )
+    return true
+  } catch (e) {
+    console.warn('⚠️ Failed to write runtime settings to PostgreSQL:', e?.message)
+    return false
+  }
+}
+
+function writeRuntimeSettingsToSqlite(settingsObj) {
+  if (!sqliteDb) return false
+  try {
+    const safe = mergeDeep(defaultRuntimeSettings(), settingsObj || {})
+    const updatedAt = Number(safe.updatedAt || Date.now())
+    sqliteDb.prepare(
+      `INSERT INTO runtime_settings(id, settings, updated_at)
+       VALUES (1, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET settings = excluded.settings, updated_at = excluded.updated_at`
+    ).run(JSON.stringify(safe), updatedAt)
+    return true
+  } catch (e) {
+    console.warn('⚠️ Failed to write runtime settings to SQLite:', e?.message)
+    return false
+  }
+}
+
+async function readRuntimeSettingsFromDb() {
+  if (pgPool) return await readRuntimeSettingsFromPostgres()
+  if (sqliteDb) return readRuntimeSettingsFromSqlite()
+  return null
+}
+
+async function writeRuntimeSettingsToDb(settingsObj) {
+  if (pgPool) return await writeRuntimeSettingsToPostgres(settingsObj)
+  if (sqliteDb) return writeRuntimeSettingsToSqlite(settingsObj)
+  return false
+}
+
+function rowToMessage(row) {
+  if (!row) return null
+  let media = null
+  if (row.media && typeof row.media === 'object') media = row.media
+  else if (typeof row.media === 'string' && row.media.trim()) {
+    try { media = JSON.parse(row.media) } catch { media = null }
+  }
+
+  return {
+    id: row.id,
+    waMsgId: row.wa_msg_id || null,
+    ts: Number(row.ts || 0),
+    direction: row.direction || 'in',
+    chatJid: normalizeJid(row.chat_jid || ''),
+    senderJid: row.sender_jid || '',
+    isGroup: Boolean(row.is_group),
+    type: row.type || 'text',
+    text: row.text_content || '',
+    media,
+    status: row.status || null,
+    statusTs: row.status_ts ? Number(row.status_ts) : null,
+    quotedMessageId: row.quoted_message_id || null
+  }
+}
+
+function persistMessageRecordToPostgres(rec) {
+  if (!pgPool || !rec?.id) return
+  const q = `
+    INSERT INTO messages(
+      id, wa_msg_id, ts, direction, chat_jid, sender_jid, is_group, type, text_content, media, status, status_ts, quoted_message_id
+    )
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,$13)
+    ON CONFLICT (id) DO UPDATE SET
+      wa_msg_id = EXCLUDED.wa_msg_id,
+      ts = EXCLUDED.ts,
+      direction = EXCLUDED.direction,
+      chat_jid = EXCLUDED.chat_jid,
+      sender_jid = EXCLUDED.sender_jid,
+      is_group = EXCLUDED.is_group,
+      type = EXCLUDED.type,
+      text_content = EXCLUDED.text_content,
+      media = EXCLUDED.media,
+      status = EXCLUDED.status,
+      status_ts = EXCLUDED.status_ts,
+      quoted_message_id = EXCLUDED.quoted_message_id
+  `
+  const vals = [
+    String(rec.id || ''),
+    rec.waMsgId ? String(rec.waMsgId) : null,
+    Number(rec.ts || Date.now()),
+    String(rec.direction || 'in'),
+    normalizeJid(rec.chatJid),
+    String(rec.senderJid || ''),
+    Boolean(rec.isGroup),
+    String(rec.type || 'text'),
+    String(rec.text || ''),
+    rec.media ? JSON.stringify(rec.media) : null,
+    rec.status ? String(rec.status) : null,
+    rec.statusTs ? Number(rec.statusTs) : null,
+    rec.quotedMessageId ? String(rec.quotedMessageId) : null
+  ]
+
+  pgPool.query(q, vals)
+    .then(async () => {
+      const msgCfg = getMessageStorageConfig()
+      const persistMax = Number(msgCfg.persistMax || 0)
+      if (persistMax > 0) {
+        await pgPool.query(
+          `DELETE FROM messages
+           WHERE id IN (
+             SELECT id FROM messages ORDER BY ts DESC OFFSET $1
+           )`,
+          [persistMax]
+        )
+      }
+    })
+    .catch((e) => {
+      console.warn('⚠️ Failed to persist message to PostgreSQL:', e?.message)
+    })
+}
+
+function persistMessageRecordToSqlite(rec) {
+  if (!sqliteDb || !rec?.id) return
+  try {
+    sqliteDb.prepare(`
+      INSERT INTO messages(
+        id, wa_msg_id, ts, direction, chat_jid, sender_jid, is_group, type, text_content, media, status, status_ts, quoted_message_id
+      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        wa_msg_id = excluded.wa_msg_id,
+        ts = excluded.ts,
+        direction = excluded.direction,
+        chat_jid = excluded.chat_jid,
+        sender_jid = excluded.sender_jid,
+        is_group = excluded.is_group,
+        type = excluded.type,
+        text_content = excluded.text_content,
+        media = excluded.media,
+        status = excluded.status,
+        status_ts = excluded.status_ts,
+        quoted_message_id = excluded.quoted_message_id
+    `).run(
+      String(rec.id || ''),
+      rec.waMsgId ? String(rec.waMsgId) : null,
+      Number(rec.ts || Date.now()),
+      String(rec.direction || 'in'),
+      normalizeJid(rec.chatJid),
+      String(rec.senderJid || ''),
+      rec.isGroup ? 1 : 0,
+      String(rec.type || 'text'),
+      String(rec.text || ''),
+      rec.media ? JSON.stringify(rec.media) : null,
+      rec.status ? String(rec.status) : null,
+      rec.statusTs ? Number(rec.statusTs) : null,
+      rec.quotedMessageId ? String(rec.quotedMessageId) : null
+    )
+
+    const msgCfg = getMessageStorageConfig()
+    const persistMax = Number(msgCfg.persistMax || 0)
+    if (persistMax > 0) {
+      sqliteDb.prepare(
+        `DELETE FROM messages
+         WHERE id IN (
+           SELECT id FROM messages ORDER BY ts DESC LIMIT -1 OFFSET ?
+         )`
+      ).run(persistMax)
+    }
+  } catch (e) {
+    console.warn('⚠️ Failed to persist message to SQLite:', e?.message)
+  }
+}
+
+function persistMessageRecordToDb(rec) {
+  if (pgPool) return persistMessageRecordToPostgres(rec)
+  if (sqliteDb) return persistMessageRecordToSqlite(rec)
+}
+
+function patchMessageInPostgresById(id, patch = {}) {
+  if (!pgPool) return
+  const key = String(id || '').trim()
+  if (!key) return
+
+  const fields = []
+  const values = []
+  let idx = 1
+
+  if (Object.prototype.hasOwnProperty.call(patch, 'status')) {
+    fields.push(`status = $${idx++}`)
+    values.push(patch.status ? String(patch.status) : null)
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'statusTs')) {
+    fields.push(`status_ts = $${idx++}`)
+    values.push(patch.statusTs ? Number(patch.statusTs) : null)
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'waMsgId')) {
+    fields.push(`wa_msg_id = $${idx++}`)
+    values.push(patch.waMsgId ? String(patch.waMsgId) : null)
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'chatJid')) {
+    fields.push(`chat_jid = $${idx++}`)
+    values.push(normalizeJid(patch.chatJid || ''))
+  }
+
+  if (!fields.length) return
+  values.push(key)
+  pgPool.query(`UPDATE messages SET ${fields.join(', ')} WHERE id = $${idx}`, values)
+    .catch(e => console.warn('⚠️ Failed to patch message in PostgreSQL:', e?.message))
+}
+
+function patchMessageInSqliteById(id, patch = {}) {
+  if (!sqliteDb) return
+  const key = String(id || '').trim()
+  if (!key) return
+
+  const fields = []
+  const values = []
+
+  if (Object.prototype.hasOwnProperty.call(patch, 'status')) {
+    fields.push('status = ?')
+    values.push(patch.status ? String(patch.status) : null)
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'statusTs')) {
+    fields.push('status_ts = ?')
+    values.push(patch.statusTs ? Number(patch.statusTs) : null)
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'waMsgId')) {
+    fields.push('wa_msg_id = ?')
+    values.push(patch.waMsgId ? String(patch.waMsgId) : null)
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'chatJid')) {
+    fields.push('chat_jid = ?')
+    values.push(normalizeJid(patch.chatJid || ''))
+  }
+  if (!fields.length) return
+
+  values.push(key)
+  try {
+    sqliteDb.prepare(`UPDATE messages SET ${fields.join(', ')} WHERE id = ?`).run(...values)
+  } catch (e) {
+    console.warn('⚠️ Failed to patch message in SQLite:', e?.message)
+  }
+}
+
+function patchMessageInDbById(id, patch = {}) {
+  if (pgPool) return patchMessageInPostgresById(id, patch)
+  if (sqliteDb) return patchMessageInSqliteById(id, patch)
+}
+
+function patchMessageInPostgresByWaMsgId(waMsgId, patch = {}) {
+  if (!pgPool) return
+  const key = String(waMsgId || '').trim()
+  if (!key) return
+
+  const fields = []
+  const values = []
+  let idx = 1
+
+  if (Object.prototype.hasOwnProperty.call(patch, 'status')) {
+    fields.push(`status = $${idx++}`)
+    values.push(patch.status ? String(patch.status) : null)
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'statusTs')) {
+    fields.push(`status_ts = $${idx++}`)
+    values.push(patch.statusTs ? Number(patch.statusTs) : null)
+  }
+
+  if (!fields.length) return
+  values.push(key)
+  pgPool.query(`UPDATE messages SET ${fields.join(', ')} WHERE wa_msg_id = $${idx}`, values)
+    .catch(e => console.warn('⚠️ Failed to patch message by wa_msg_id in PostgreSQL:', e?.message))
+}
+
+function patchMessageInSqliteByWaMsgId(waMsgId, patch = {}) {
+  if (!sqliteDb) return
+  const key = String(waMsgId || '').trim()
+  if (!key) return
+
+  const fields = []
+  const values = []
+
+  if (Object.prototype.hasOwnProperty.call(patch, 'status')) {
+    fields.push('status = ?')
+    values.push(patch.status ? String(patch.status) : null)
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'statusTs')) {
+    fields.push('status_ts = ?')
+    values.push(patch.statusTs ? Number(patch.statusTs) : null)
+  }
+  if (!fields.length) return
+
+  values.push(key)
+  try {
+    sqliteDb.prepare(`UPDATE messages SET ${fields.join(', ')} WHERE wa_msg_id = ?`).run(...values)
+  } catch (e) {
+    console.warn('⚠️ Failed to patch message by wa_msg_id in SQLite:', e?.message)
+  }
+}
+
+function patchMessageInDbByWaMsgId(waMsgId, patch = {}) {
+  if (pgPool) return patchMessageInPostgresByWaMsgId(waMsgId, patch)
+  if (sqliteDb) return patchMessageInSqliteByWaMsgId(waMsgId, patch)
+}
+
+// ----------------------------
+// Generic KV store helpers (contacts, templates, rules, automations, etc.)
+// ----------------------------
+
+function writeKvToDb(key, valueObj) {
+  const k = String(key || '').trim()
+  if (!k) return Promise.resolve(false)
+  const json = JSON.stringify(valueObj)
+  const ts = Date.now()
+
+  if (pgPool) {
+    return pgPool.query(
+      `INSERT INTO kv_store(key, value, updated_at) VALUES ($1, $2::jsonb, $3)
+       ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`,
+      [k, json, ts]
+    ).then(() => true).catch(e => { console.warn(`⚠️ kv_store write failed [${k}]:`, e?.message); return false })
+  }
+
+  if (sqliteDb) {
+    try {
+      sqliteDb.prepare(
+        `INSERT INTO kv_store(key, value, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+      ).run(k, json, ts)
+      return Promise.resolve(true)
+    } catch (e) {
+      console.warn(`⚠️ kv_store write failed [${k}]:`, e?.message)
+      return Promise.resolve(false)
+    }
+  }
+
+  return Promise.resolve(false)
+}
+
+async function readKvFromDb(key, fallback = null) {
+  const k = String(key || '').trim()
+  if (!k) return fallback
+
+  if (pgPool) {
+    try {
+      const r = await pgPool.query('SELECT value FROM kv_store WHERE key = $1 LIMIT 1', [k])
+      const row = r.rows?.[0]
+      if (!row) return fallback
+      const v = row.value && typeof row.value === 'object' ? row.value : null
+      if (v) return v
+      try { return JSON.parse(String(row.value || '')) } catch { return fallback }
+    } catch (e) {
+      console.warn(`⚠️ kv_store read failed [${k}]:`, e?.message)
+      return fallback
+    }
+  }
+
+  if (sqliteDb) {
+    try {
+      const row = sqliteDb.prepare('SELECT value FROM kv_store WHERE key = ? LIMIT 1').get(k)
+      if (!row) return fallback
+      try { return JSON.parse(String(row.value || '')) } catch { return fallback }
+    } catch (e) {
+      console.warn(`⚠️ kv_store read failed [${k}]:`, e?.message)
+      return fallback
+    }
+  }
+
+  return fallback
+}
+
+function deleteKvFromDb(key) {
+  const k = String(key || '').trim()
+  if (!k) return Promise.resolve(false)
+
+  if (pgPool) {
+    return pgPool.query('DELETE FROM kv_store WHERE key = $1', [k])
+      .then(() => true)
+      .catch((e) => {
+        console.warn(`⚠️ kv_store delete failed [${k}]:`, e?.message)
+        return false
+      })
+  }
+
+  if (sqliteDb) {
+    try {
+      sqliteDb.prepare('DELETE FROM kv_store WHERE key = ?').run(k)
+      return Promise.resolve(true)
+    } catch (e) {
+      console.warn(`⚠️ kv_store delete failed [${k}]:`, e?.message)
+      return Promise.resolve(false)
+    }
+  }
+
+  return Promise.resolve(false)
+}
+
+async function readAuthCredsFromDb() {
+  const raw = await readKvFromDb(AUTH_CREDS_DB_KEY, null)
+  if (!raw || typeof raw !== 'object') return null
+  try {
+    return JSON.parse(JSON.stringify(raw), BufferJSON.reviver)
+  } catch {
+    return null
+  }
+}
+
+async function writeAuthCredsToDb(creds) {
+  if (!creds || typeof creds !== 'object') return false
+  return await writeKvToDb(AUTH_CREDS_DB_KEY, creds)
+}
+
+async function readAuthKeysFromDb(type, ids = []) {
+  const out = {}
+  const keyType = String(type || '').trim()
+  const wanted = Array.isArray(ids) ? ids.map(x => String(x || '').trim()).filter(Boolean) : []
+  if (!keyType || !wanted.length) return out
+
+  if (pgPool) {
+    try {
+      const r = await pgPool.query(
+        'SELECT key_id, value FROM wa_auth_keys WHERE key_type = $1 AND key_id = ANY($2::text[])',
+        [keyType, wanted]
+      )
+      for (const row of (r.rows || [])) {
+        if (!row?.key_id) continue
+        const val = row.value && typeof row.value === 'object'
+          ? row.value
+          : (() => { try { return JSON.parse(String(row.value || '{}'), BufferJSON.reviver) } catch { return null } })()
+        if (val !== null) out[String(row.key_id)] = val
+      }
+    } catch (e) {
+      console.warn('⚠️ Failed reading auth keys from PostgreSQL:', e?.message)
+    }
+    return out
+  }
+
+  if (sqliteDb) {
+    try {
+      const placeholders = wanted.map(() => '?').join(',')
+      const rows = sqliteDb.prepare(
+        `SELECT key_id, value FROM wa_auth_keys WHERE key_type = ? AND key_id IN (${placeholders})`
+      ).all(keyType, ...wanted)
+      for (const row of (rows || [])) {
+        const keyId = String(row?.key_id || '')
+        if (!keyId) continue
+        try {
+          out[keyId] = JSON.parse(String(row.value || '{}'))
+        } catch {}
+      }
+    } catch (e) {
+      console.warn('⚠️ Failed reading auth keys from SQLite:', e?.message)
+    }
+  }
+
+  return out
+}
+
+async function writeAuthKeysToDb(data = {}) {
+  const entries = []
+  for (const [type, value] of Object.entries(data || {})) {
+    const t = String(type || '').trim()
+    if (!t || !value || typeof value !== 'object') continue
+    for (const [id, payload] of Object.entries(value || {})) {
+      entries.push({ type: t, id: String(id || '').trim(), payload })
+    }
+  }
+
+  if (!entries.length) return true
+
+  if (pgPool) {
+    try {
+      for (const row of entries) {
+        if (!row.id) continue
+        if (row.payload) {
+          await pgPool.query(
+            `INSERT INTO wa_auth_keys(key_type, key_id, value, updated_at)
+             VALUES ($1, $2, $3::jsonb, $4)
+             ON CONFLICT(key_type, key_id) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`,
+            [row.type, row.id, JSON.stringify(row.payload), Date.now()]
+          )
+        } else {
+          await pgPool.query('DELETE FROM wa_auth_keys WHERE key_type = $1 AND key_id = $2', [row.type, row.id])
+        }
+      }
+      return true
+    } catch (e) {
+      console.warn('⚠️ Failed writing auth keys to PostgreSQL:', e?.message)
+      return false
+    }
+  }
+
+  if (sqliteDb) {
+    try {
+      const upsert = sqliteDb.prepare(
+        `INSERT INTO wa_auth_keys(key_type, key_id, value, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(key_type, key_id) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+      )
+      const del = sqliteDb.prepare('DELETE FROM wa_auth_keys WHERE key_type = ? AND key_id = ?')
+      const ts = Date.now()
+      sqliteDb.transaction(() => {
+        for (const row of entries) {
+          if (!row.id) continue
+          if (row.payload) upsert.run(row.type, row.id, JSON.stringify(row.payload), ts)
+          else del.run(row.type, row.id)
+        }
+      })()
+      return true
+    } catch (e) {
+      console.warn('⚠️ Failed writing auth keys to SQLite:', e?.message)
+      return false
+    }
+  }
+
+  return false
+}
+
+// In-memory cache for Baileys signal-protocol keys.
+// Keeps keys.get/set off the hot DB path so the event loop never blocks during WA handshake.
+let waAuthKeysCache = {} // { [type]: { [id]: value } }
+
+async function clearAuthFromDb() {
+  await deleteKvFromDb(AUTH_CREDS_DB_KEY).catch(() => {})
+  if (pgPool) {
+    await pgPool.query('DELETE FROM wa_auth_keys').catch(() => {})
+  } else if (sqliteDb) {
+    try { sqliteDb.prepare('DELETE FROM wa_auth_keys').run() } catch {}
+  }
+  waAuthKeysCache = {}
+}
+
+async function preloadAuthKeysToCache() {
+  // Load ALL auth keys from DB into memory cache before WhatsApp handshake
+  // This ensures keys.get never hits the DB during critical handshake phase
+  waAuthKeysCache = {}
+  
+  if (pgPool) {
+    try {
+      const r = await pgPool.query('SELECT key_type, key_id, value FROM wa_auth_keys')
+      for (const row of (r.rows || [])) {
+        const type = String(row?.key_type || '')
+        const id = String(row?.key_id || '')
+        if (!type || !id) continue
+        const val = row.value && typeof row.value === 'object'
+          ? row.value
+          : (() => { try { return JSON.parse(String(row.value || '{}')) } catch { return null } })()
+        if (val !== null) {
+          if (!waAuthKeysCache[type]) waAuthKeysCache[type] = {}
+          waAuthKeysCache[type][id] = val
+        }
+      }
+    } catch (e) {
+      console.warn('⚠️ Failed preloading auth keys from PostgreSQL:', e?.message)
+    }
+  } else if (sqliteDb) {
+    try {
+      const rows = sqliteDb.prepare('SELECT key_type, key_id, value FROM wa_auth_keys').all()
+      for (const row of (rows || [])) {
+        const type = String(row?.key_type || '')
+        const id = String(row?.key_id || '')
+        if (!type || !id) continue
+        try {
+          const val = JSON.parse(String(row.value || '{}'), BufferJSON.reviver)
+          if (!waAuthKeysCache[type]) waAuthKeysCache[type] = {}
+          waAuthKeysCache[type][id] = val
+        } catch {}
+      }
+    } catch (e) {
+      console.warn('⚠️ Failed preloading auth keys from SQLite:', e?.message)
+    }
+  }
+}
+
+async function getAuthStateFromDb() {
+  const credsFromDb = await readAuthCredsFromDb()
+  waAuthCreds = credsFromDb || initAuthCreds()
+
+  const state = {
+    creds: waAuthCreds,
+    keys: {
+      get: async (type, ids) => {
+        // NEVER hit the DB during get — cache is preloaded before handshake
+        const keyType = String(type || '')
+        const wanted = Array.isArray(ids) ? ids.map(id => String(id || '')).filter(Boolean) : []
+        if (!keyType || !wanted.length) return {}
+
+        const cached = waAuthKeysCache[keyType] || {}
+        const result = {}
+        for (const id of wanted) {
+          const v = cached[id]
+          if (v != null) result[id] = v
+        }
+        return result
+      },
+      set: async (data) => {
+        // Update in-memory cache immediately (synchronous, no I/O)
+        for (const [type, vals] of Object.entries(data || {})) {
+          if (!waAuthKeysCache[type]) waAuthKeysCache[type] = {}
+          for (const [id, val] of Object.entries(vals || {})) {
+            if (val != null) waAuthKeysCache[type][id] = val
+            else delete waAuthKeysCache[type][id]
+          }
+        }
+        // Note: actual DB writes are deferred/batched by caller (startWhatsApp)
+      }
+    }
+  }
+
+  const saveCreds = async () => {
+    await writeAuthCredsToDb(state.creds)
+  }
+
+  return { state, saveCreds }
+}
+
+
+let automations = defaultAutomationsConfig()
+
+let responseRules = defaultRulesConfig()
+
+let runtimeSettings = defaultRuntimeSettings()
+let contactsStoreCache = { contacts: [], groups: [], updatedAt: Date.now() }
+let contactsStoreNeedsNormalize = true
+let contactsNormalizationInProgress = false
+let templatesStoreCache = defaultTemplatesConfig()
+let schedulesStoreCache = defaultSchedulesConfig()
+let deadLettersStoreCache = defaultN8nDeadLettersConfig()
+let adminAuditStoreCache = { items: [], updatedAt: Date.now() }
+let messagesStoreCache = { messages: [], updatedAt: Date.now() }
 
 function ensureRuntimeSettingsStore() {
-  if (fs.existsSync(RUNTIME_SETTINGS_FILE)) return
-  fs.mkdirSync(path.dirname(RUNTIME_SETTINGS_FILE), { recursive: true })
-  writeJsonFileAtomic(RUNTIME_SETTINGS_FILE, defaultRuntimeSettings())
-  console.log(`⚙️ Created runtime settings store: ${RUNTIME_SETTINGS_FILE}`)
+  // no-op: DB-backed
 }
 
 function readRuntimeSettingsStore() {
-  ensureRuntimeSettingsStore()
-  const raw = readJsonFileSafe(RUNTIME_SETTINGS_FILE, defaultRuntimeSettings())
+  const raw = runtimeSettings || defaultRuntimeSettings()
   const merged = mergeDeep(defaultRuntimeSettings(), raw)
   merged.updatedAt = Number(raw.updatedAt || Date.now())
   merged.lastSavedBy = String(raw.lastSavedBy || merged.lastSavedBy || 'startup-defaults')
+  runtimeSettings = merged
   return merged
 }
 
@@ -345,7 +1217,7 @@ function saveRuntimeSettingsStore() {
   try {
     runtimeSettings.updatedAt = Date.now()
     runtimeSettings.lastSavedBy = String(runtimeSettings.lastSavedBy || 'startup-defaults')
-    writeJsonFileAtomic(RUNTIME_SETTINGS_FILE, runtimeSettings)
+    writeRuntimeSettingsToDb(runtimeSettings).catch(() => {})
   } catch (e) {
     console.warn('⚠️ Failed to save runtime settings:', e?.message)
   }
@@ -387,9 +1259,26 @@ function getRateLimitConfig() {
   return cfg
 }
 
+function getApiConfig() {
+  const cfg = mergeDeep(defaultRuntimeSettings().api, runtimeSettings?.api || {})
+  cfg.enabled = Boolean(cfg.enabled)
+  cfg.sendTextEnabled = Boolean(cfg.sendTextEnabled)
+  cfg.sendImageEnabled = Boolean(cfg.sendImageEnabled)
+  cfg.sendDocumentEnabled = Boolean(cfg.sendDocumentEnabled)
+  return cfg
+}
+
 function getMediaConfig() {
   const cfg = mergeDeep(defaultRuntimeSettings().media, runtimeSettings?.media || {})
   cfg.urlTtlSeconds = Math.max(60, Number(cfg.urlTtlSeconds || 0))
+  cfg.retentionDays = Math.max(1, Number(cfg.retentionDays || 0))
+  return cfg
+}
+
+function getMessageStorageConfig() {
+  const cfg = mergeDeep(defaultRuntimeSettings().messages, runtimeSettings?.messages || {})
+  cfg.uiFetchLimit = Math.min(2000, Math.max(50, Number(cfg.uiFetchLimit || 0)))
+  cfg.persistMax = Math.max(0, Number(cfg.persistMax || 0))
   return cfg
 }
 
@@ -397,24 +1286,18 @@ function saveAutomations() {
   try {
     automations.updatedAt = Number(automations.updatedAt || Date.now())
     automations.lastSavedBy = String(automations.lastSavedBy || 'startup-defaults')
-    writeJsonFileAtomic(AUTOMATIONS_FILE, automations)
+    writeKvToDb('automations', automations).catch(() => {})
   } catch (e) {
     console.warn('⚠️ Failed to save automations config:', e?.message)
   }
 }
 
 function ensureRulesStore() {
-  if (fs.existsSync(RULES_FILE)) return
-  fs.mkdirSync(path.dirname(RULES_FILE), { recursive: true })
-  writeJsonFileAtomic(RULES_FILE, defaultRulesConfig())
-  console.log(`🧠 Created rules store: ${RULES_FILE}`)
+  // no-op: DB-backed
 }
 
 function ensureTemplatesStore() {
-  if (fs.existsSync(TEMPLATES_FILE)) return
-  fs.mkdirSync(path.dirname(TEMPLATES_FILE), { recursive: true })
-  writeJsonFileAtomic(TEMPLATES_FILE, defaultTemplatesConfig())
-  console.log(`🧩 Created templates store: ${TEMPLATES_FILE}`)
+  // no-op: DB-backed
 }
 
 function normalizeTemplateInput(template = {}, existing = null) {
@@ -451,8 +1334,7 @@ function normalizeTemplateInput(template = {}, existing = null) {
 }
 
 function readTemplatesStore() {
-  ensureTemplatesStore()
-  const raw = readJsonFileSafe(TEMPLATES_FILE, defaultTemplatesConfig())
+  const raw = templatesStoreCache || defaultTemplatesConfig()
   const rows = Array.isArray(raw.templates) ? raw.templates : []
   const templates = rows
     .map(t => {
@@ -460,10 +1342,11 @@ function readTemplatesStore() {
     })
     .filter(Boolean)
 
-  return {
+  templatesStoreCache = {
     templates,
     updatedAt: Number(raw.updatedAt || Date.now())
   }
+  return templatesStoreCache
 }
 
 function writeTemplatesStore(store) {
@@ -471,7 +1354,8 @@ function writeTemplatesStore(store) {
     templates: Array.isArray(store?.templates) ? store.templates : [],
     updatedAt: Date.now()
   }
-  writeJsonFileAtomic(TEMPLATES_FILE, next)
+  templatesStoreCache = next
+  writeKvToDb('templates', next).catch(() => {})
   return next
 }
 
@@ -505,12 +1389,12 @@ function deleteTemplate(store, idRaw) {
 }
 
 function readRulesStore() {
-  ensureRulesStore()
-  const raw = readJsonFileSafe(RULES_FILE, defaultRulesConfig())
+  const raw = responseRules || defaultRulesConfig()
   raw.enabled = Boolean(raw.enabled)
   raw.rules = Array.isArray(raw.rules) ? raw.rules : []
   raw.updatedAt = Number(raw.updatedAt || Date.now())
-  return raw
+  responseRules = raw
+  return responseRules
 }
 
 function saveRulesStore() {
@@ -520,25 +1404,22 @@ function saveRulesStore() {
       rules: Array.isArray(responseRules?.rules) ? responseRules.rules : [],
       updatedAt: Date.now()
     }
-    writeJsonFileAtomic(RULES_FILE, responseRules)
+    writeKvToDb('rules', responseRules).catch(() => {})
   } catch (e) {
     console.warn('⚠️ Failed to save rules config:', e?.message)
   }
 }
 
 function ensureSchedulesStore() {
-  if (fs.existsSync(SCHEDULES_FILE)) return
-  fs.mkdirSync(path.dirname(SCHEDULES_FILE), { recursive: true })
-  writeJsonFileAtomic(SCHEDULES_FILE, defaultSchedulesConfig())
-  console.log(`🗓️ Created schedules store: ${SCHEDULES_FILE}`)
+  // no-op: DB-backed
 }
 
 function readSchedulesStore() {
-  ensureSchedulesStore()
-  const raw = readJsonFileSafe(SCHEDULES_FILE, defaultSchedulesConfig())
+  const raw = schedulesStoreCache || defaultSchedulesConfig()
   raw.schedules = Array.isArray(raw.schedules) ? raw.schedules : []
   raw.updatedAt = Number(raw.updatedAt || Date.now())
-  return raw
+  schedulesStoreCache = raw
+  return schedulesStoreCache
 }
 
 function writeSchedulesStore(store) {
@@ -546,23 +1427,21 @@ function writeSchedulesStore(store) {
     schedules: Array.isArray(store?.schedules) ? store.schedules : [],
     updatedAt: Date.now()
   }
-  writeJsonFileAtomic(SCHEDULES_FILE, next)
+  schedulesStoreCache = next
+  writeKvToDb('schedules', next).catch(() => {})
   return next
 }
 
 function ensureN8nDeadLettersStore() {
-  if (fs.existsSync(N8N_DEAD_LETTERS_FILE)) return
-  fs.mkdirSync(path.dirname(N8N_DEAD_LETTERS_FILE), { recursive: true })
-  writeJsonFileAtomic(N8N_DEAD_LETTERS_FILE, defaultN8nDeadLettersConfig())
-  console.log(`📭 Created n8n dead-letter store: ${N8N_DEAD_LETTERS_FILE}`)
+  // no-op: DB-backed
 }
 
 function readN8nDeadLettersStore() {
-  ensureN8nDeadLettersStore()
-  const raw = readJsonFileSafe(N8N_DEAD_LETTERS_FILE, defaultN8nDeadLettersConfig())
+  const raw = deadLettersStoreCache || defaultN8nDeadLettersConfig()
   raw.items = Array.isArray(raw.items) ? raw.items : []
   raw.updatedAt = Number(raw.updatedAt || Date.now())
-  return raw
+  deadLettersStoreCache = raw
+  return deadLettersStoreCache
 }
 
 function writeN8nDeadLettersStore(store) {
@@ -570,7 +1449,8 @@ function writeN8nDeadLettersStore(store) {
     items: Array.isArray(store?.items) ? store.items.slice(-500) : [],
     updatedAt: Date.now()
   }
-  writeJsonFileAtomic(N8N_DEAD_LETTERS_FILE, next)
+  deadLettersStoreCache = next
+  writeKvToDb('n8n_dead_letters', next).catch(() => {})
   return next
 }
 
@@ -672,6 +1552,13 @@ function normalizeResponseRule(input = {}, existing = null) {
   const triggerType = ['text', 'voice_note'].includes(input.triggerType) ? input.triggerType : (existing?.triggerType || 'text')
   const scope = ['dm', 'group', 'both'].includes(input.scope) ? input.scope : (existing?.scope || 'both')
   const matchType = ['contains', 'equals', 'regex', 'any'].includes(input.matchType) ? input.matchType : (existing?.matchType || (triggerType === 'voice_note' ? 'any' : 'contains'))
+  const dmFilterMode = ['all', 'include', 'exclude'].includes(input.dmFilterMode)
+    ? input.dmFilterMode
+    : (['all', 'include', 'exclude'].includes(existing?.dmFilterMode) ? existing.dmFilterMode : 'all')
+  const dmFilterRaw = input.dmFilterValues ?? existing?.dmFilterValues ?? input.dmFilterList ?? existing?.dmFilterList ?? []
+  const dmFilterValues = (Array.isArray(dmFilterRaw) ? dmFilterRaw : String(dmFilterRaw || '').split(/[\n,;]+/g))
+    .map(v => String(v || '').trim())
+    .filter(Boolean)
   const autoReplyCfg = getAutoReplyConfig()
   const groupPrefix = String(input.groupPrefix ?? existing?.groupPrefix ?? autoReplyCfg.groupPrefix).trim()
   const replyText = String(input.replyText ?? existing?.replyText ?? '').trim()
@@ -685,6 +1572,8 @@ function normalizeResponseRule(input = {}, existing = null) {
     scope,
     matchType,
     matchValue: String(input.matchValue ?? existing?.matchValue ?? '').trim(),
+    dmFilterMode,
+    dmFilterValues,
     requirePrefix: input.requirePrefix === undefined ? Boolean(existing?.requirePrefix) : Boolean(input.requirePrefix),
     groupPrefix,
     replyText,
@@ -720,11 +1609,15 @@ function normalizeRuntimeSettingsPatch(input = {}) {
   const current = getAutoReplyConfig()
   const currentQueue = getQueueConfig()
   const currentRateLimit = getRateLimitConfig()
+  const currentApi = getApiConfig()
+  const currentMessages = getMessageStorageConfig()
   const currentMedia = getMediaConfig()
   const auto = input.autoReply || {}
   const queue = input.queue || {}
   const queueQuiet = queue.quietHours || {}
   const rateLimit = input.rateLimit || {}
+  const api = input.api || {}
+  const messages = input.messages || {}
   const media = input.media || {}
   const out = {
     autoReply: {
@@ -754,8 +1647,19 @@ function normalizeRuntimeSettingsPatch(input = {}) {
       windowMs: Math.max(1000, Number(rateLimit.windowMs === undefined ? currentRateLimit.windowMs : rateLimit.windowMs) || 0),
       max: Math.max(1, Number(rateLimit.max === undefined ? currentRateLimit.max : rateLimit.max) || 0)
     },
+    api: {
+      enabled: api.enabled === undefined ? currentApi.enabled : Boolean(api.enabled),
+      sendTextEnabled: api.sendTextEnabled === undefined ? currentApi.sendTextEnabled : Boolean(api.sendTextEnabled),
+      sendImageEnabled: api.sendImageEnabled === undefined ? currentApi.sendImageEnabled : Boolean(api.sendImageEnabled),
+      sendDocumentEnabled: api.sendDocumentEnabled === undefined ? currentApi.sendDocumentEnabled : Boolean(api.sendDocumentEnabled)
+    },
+    messages: {
+      uiFetchLimit: Math.min(2000, Math.max(50, Number(messages.uiFetchLimit === undefined ? currentMessages.uiFetchLimit : messages.uiFetchLimit) || 0)),
+      persistMax: Math.max(0, Number(messages.persistMax === undefined ? currentMessages.persistMax : messages.persistMax) || 0)
+    },
     media: {
-      urlTtlSeconds: Math.max(60, Number(media.urlTtlSeconds === undefined ? currentMedia.urlTtlSeconds : media.urlTtlSeconds) || 0)
+      urlTtlSeconds: Math.max(60, Number(media.urlTtlSeconds === undefined ? currentMedia.urlTtlSeconds : media.urlTtlSeconds) || 0),
+      retentionDays: Math.max(1, Number(media.retentionDays === undefined ? currentMedia.retentionDays : media.retentionDays) || 0)
     }
   }
   return out
@@ -1207,10 +2111,7 @@ console.log('🤖 Settings:', {
   AUTO_REPLY_GROUP_PREFIX: bootAutoReply.groupPrefix,
   MAX_URL_FETCH_MB,
   URL_FETCH_TIMEOUT_MS,
-  MESSAGES_STORE_FILE,
-  MESSAGES_MAX,
-  MESSAGES_MEMORY_LIMIT,
-  RULES_FILE
+  MESSAGES_MEMORY_LIMIT
 })
 
 /**
@@ -1293,6 +2194,66 @@ function ruleScopeMatches(rule, isGroup) {
   return false
 }
 
+function normalizeDmFilterToken(raw) {
+  return String(raw || '').trim().toLowerCase()
+}
+
+function collectDmIdentitySet(inbound) {
+  const identities = new Set()
+  const add = (v) => {
+    const s = String(v || '').trim()
+    if (!s) return
+    identities.add(s.toLowerCase())
+  }
+  const addPhone = (v) => {
+    const c = canonicalMsisdn(v)
+    if (!c) return
+    add(c)
+    add(localMsisdnDisplay(c))
+    add(intlMsisdnDisplay(c))
+  }
+  const addJid = (v) => {
+    const j = normalizeJid(v)
+    if (!j) return
+    add(j)
+    addPhone(msisdnFromJid(j))
+  }
+
+  const senderJid = normalizeJid(inbound?.senderJid || '')
+  const chatJid = normalizeJid(inbound?.chatJid || '')
+  addJid(senderJid)
+  addJid(chatJid)
+
+  const store = readContactsStore()
+  const found = findContactByAnyDirectId(store, senderJid || chatJid || '', msisdnFromJid(senderJid || chatJid || ''))
+  if (found) {
+    add(found.name)
+    addJid(found.jid)
+    for (const a of normalizeAliasJids(found.aliasJids || [], found.jid || '')) addJid(a)
+    addPhone(found.msisdn || '')
+    addPhone(found.msisdnIntl || '')
+  }
+
+  return identities
+}
+
+function ruleDmFilterMatches(rule, inbound) {
+  if (inbound?.isGroup) return true
+  const mode = ['all', 'include', 'exclude'].includes(rule?.dmFilterMode) ? rule.dmFilterMode : 'all'
+  if (mode === 'all') return true
+
+  const values = Array.isArray(rule?.dmFilterValues)
+    ? rule.dmFilterValues.map(normalizeDmFilterToken).filter(Boolean)
+    : []
+  if (!values.length) return mode !== 'include'
+
+  const ids = collectDmIdentitySet(inbound)
+  const matched = values.some(v => ids.has(v))
+  if (mode === 'include') return matched
+  if (mode === 'exclude') return !matched
+  return true
+}
+
 function findMatchingResponseRule(inbound) {
   if (!responseRules?.enabled) return null
 
@@ -1301,6 +2262,7 @@ function findMatchingResponseRule(inbound) {
     const rule = normalizeResponseRule(rawRule, rawRule)
     if (!rule.enabled) continue
     if (!ruleScopeMatches(rule, inbound.isGroup)) continue
+    if (!ruleDmFilterMatches(rule, inbound)) continue
 
     if (rule.triggerType === 'voice_note') {
       if (!inbound.voiceNote) continue
@@ -1403,22 +2365,22 @@ function resolveLidToMsisdn(lidRaw) {
     return lidReverseMsisdnCache.get(lid) || ''
   }
 
-  const reversePath = path.join(AUTH_DIR, `lid-mapping-${lid}_reverse.json`)
-  if (!fs.existsSync(reversePath)) {
-    lidReverseMsisdnCache.set(lid, '')
-    return ''
-  }
+  // Avoid recursive/heavy lookups while contacts are being normalized.
+  if (contactsNormalizationInProgress) return ''
 
-  try {
-    const parsed = JSON.parse(fs.readFileSync(reversePath, 'utf8'))
-    const canonical = canonicalMsisdn(parsed)
-    const local = localMsisdnDisplay(canonical)
-    lidReverseMsisdnCache.set(lid, local || '')
-    return local || ''
-  } catch {
-    lidReverseMsisdnCache.set(lid, '')
-    return ''
-  }
+  // Infer from in-memory contacts graph without triggering readContactsStore normalization.
+  const lidJid = `${lid}@lid`
+  const store = contactsStoreCache || { contacts: [] }
+  const contact = (store.contacts || []).find(c => {
+    if (String(c?.jid || '').trim().toLowerCase() === lidJid) return true
+    const aliases = Array.isArray(c?.aliasJids) ? c.aliasJids : []
+    return aliases.some(a => String(a || '').trim().toLowerCase() === lidJid)
+  })
+
+  const ms = canonicalMsisdn(contact?.msisdn || '')
+  const local = localMsisdnDisplay(ms)
+  lidReverseMsisdnCache.set(lid, local || '')
+  return local || ''
 }
 
 function resolveLidToUserJid(lidRaw) {
@@ -1459,10 +2421,10 @@ function normalizeJid(jid) {
     if (/^\d+@w\.whatsapp\.net$/.test(lower)) {
       return `${j.split('@')[0]}@s.whatsapp.net`
     }
-    if (lower.endsWith('@lid')) {
-      const mapped = resolveLidToUserJid(j)
-      return mapped || j
-    }
+    // NOTE: @lid JIDs are kept as-is here.
+    // Resolving @lid → phone JID requires readContactsStore() which in turn calls
+    // normalizeJid() via normalizeContactInput/normalizeAliasJids, causing infinite recursion.
+    // Callers that need LID → phone resolution should call resolveLidToUserJid() explicitly.
     return j
   }
   // Looks like phone: convert
@@ -1695,33 +2657,33 @@ function saveOutboundBufferToDisk(buf, kind, idHint, mimetype, fileNameHint) {
  * ----------------------------
  */
 function ensureContactsStore() {
-  if (fs.existsSync(CONTACTS_FILE)) return
-  fs.mkdirSync(path.dirname(CONTACTS_FILE), { recursive: true })
-  const initial = { contacts: [], groups: [], updatedAt: Date.now() }
-  fs.writeFileSync(CONTACTS_FILE, JSON.stringify(initial, null, 2))
-  console.log(`📒 Created contacts store: ${CONTACTS_FILE}`)
+  // no-op: DB-backed
 }
 
 function readContactsStore() {
-  ensureContactsStore()
-  try {
-    const parsed = JSON.parse(fs.readFileSync(CONTACTS_FILE, 'utf8'))
-    const normalized = normalizeContactsStore(parsed)
-    if (normalized.__changed) {
-      const { __changed, ...toSave } = normalized
-      fs.writeFileSync(CONTACTS_FILE, JSON.stringify(toSave, null, 2))
-      recanonicalizeMessagesUsingStore(toSave)
-      return toSave
-    }
-    return normalized
+  if (!contactsStoreNeedsNormalize && contactsStoreCache && typeof contactsStoreCache === 'object') {
+    return contactsStoreCache
   }
-  catch { return { contacts: [], groups: [], updatedAt: Date.now() } }
+
+  const normalized = normalizeContactsStore(contactsStoreCache || { contacts: [], groups: [], updatedAt: Date.now() })
+  if (normalized.__changed) {
+    const { __changed, ...toSave } = normalized
+    contactsStoreCache = toSave
+    contactsStoreNeedsNormalize = false
+    recanonicalizeMessagesUsingStore(toSave)
+    return toSave
+  }
+  contactsStoreCache = normalized
+  contactsStoreNeedsNormalize = false
+  return normalized
 }
 
 function writeContactsStore(store) {
   const next = { ...store, updatedAt: Date.now() }
   dedupeContactsByIdentity(next)
-  fs.writeFileSync(CONTACTS_FILE, JSON.stringify(next, null, 2))
+  contactsStoreCache = next
+  contactsStoreNeedsNormalize = false
+  writeKvToDb('contacts', next).catch(() => {})
   recanonicalizeMessagesUsingStore(next)
   return next
 }
@@ -1896,6 +2858,8 @@ function pickPreferredPrimaryJid(currentJidRaw = '', incomingJidRaw = '', msisdn
 }
 
 function normalizeContactsStore(storeRaw) {
+  contactsNormalizationInProgress = true
+  try {
   const base = {
     contacts: Array.isArray(storeRaw?.contacts) ? storeRaw.contacts : [],
     groups: Array.isArray(storeRaw?.groups) ? storeRaw.groups : [],
@@ -1905,7 +2869,7 @@ function normalizeContactsStore(storeRaw) {
   const deduped = { contacts: [], groups: base.groups, updatedAt: base.updatedAt }
   for (const c of base.contacts) {
     try {
-      upsertContact(deduped, c)
+      upsertContact(deduped, c, { skipDedupe: true })
     } catch {}
   }
 
@@ -1982,6 +2946,9 @@ function normalizeContactsStore(storeRaw) {
   const after = JSON.stringify(deduped.contacts)
   if (before !== after) return { ...deduped, __changed: true }
   return deduped
+  } finally {
+    contactsNormalizationInProgress = false
+  }
 }
 
 function rebuildRecentChatIndex() {
@@ -2087,32 +3054,27 @@ function buildBoardUrl(slug, reqLike = null, sizeRaw = 'm', densityRaw = 'normal
   return url.toString()
 }
 
+function normalizeBoards(raw) {
+  return (Array.isArray(raw) ? raw : []).map((board) => {
+    const size = normalizeBoardSize(board?.size || 'm')
+    const density = normalizeBoardDensity(board?.density || 'normal')
+    const baseUrl = String(board?.url || '').trim()
+    if (!baseUrl) return { ...board, size, density }
+    try {
+      const u = new URL(baseUrl)
+      u.searchParams.set('size', size)
+      u.searchParams.set('density', density)
+      return { ...board, size, density, url: u.toString() }
+    } catch {
+      return { ...board, size, density }
+    }
+  })
+}
+
 function loadBoards() {
   try {
-    if (fs.existsSync(BOARDS_FILE)) {
-      const data = JSON.parse(fs.readFileSync(BOARDS_FILE, 'utf8'))
-      boards = Array.isArray(data)
-        ? data.map((board) => {
-            const size = normalizeBoardSize(board?.size || 'm')
-            const density = normalizeBoardDensity(board?.density || 'normal')
-            const baseUrl = String(board?.url || '').trim()
-            if (!baseUrl) return { ...board, size, density }
-            try {
-              const u = new URL(baseUrl)
-              u.searchParams.set('size', size)
-              u.searchParams.set('density', density)
-              return { ...board, size, density, url: u.toString() }
-            } catch {
-              return { ...board, size, density }
-            }
-          })
-        : []
-    } else {
-      boards = []
-      fs.mkdirSync(path.dirname(BOARDS_FILE), { recursive: true })
-      fs.writeFileSync(BOARDS_FILE, '[]')
-    }
-    console.log(`📢 Loaded ${boards.length} notice board(s)`)
+    boards = normalizeBoards(boards)
+    console.log(`📢 Loaded ${boards.length} notice board(s) (from db)`)
   } catch (e) {
     console.warn('⚠️ Failed to load boards:', e.message)
     boards = []
@@ -2120,12 +3082,7 @@ function loadBoards() {
 }
 
 function saveBoards() {
-  try {
-    fs.mkdirSync(path.dirname(BOARDS_FILE), { recursive: true })
-    fs.writeFileSync(BOARDS_FILE, JSON.stringify(boards, null, 2))
-  } catch (e) {
-    console.warn('⚠️ Failed to save boards:', e.message)
-  }
+  writeKvToDb('boards', boards).catch(() => {})
 }
 
 function generateSlug(name) {
@@ -2137,7 +3094,7 @@ function generateSlug(name) {
   return base || 'board'
 }
 
-function upsertContact(store, contact) {
+function upsertContact(store, contact, opts = {}) {
   const normalized = normalizeContactInput(contact)
   const key = norm(normalized.name)
   if (!key) throw new Error('Contact name required')
@@ -2187,7 +3144,7 @@ function upsertContact(store, contact) {
     next.aliasJids = normalizeAliasJids(next.aliasJids || [], next.jid)
     store.contacts.push(next)
   }
-  dedupeContactsByIdentity(store)
+  if (!opts?.skipDedupe) dedupeContactsByIdentity(store)
   return store
 }
 
@@ -2678,28 +3635,13 @@ function deleteGroupAlias(store, name) {
   return before !== store.groups.length
 }
 
-/**
- * ----------------------------
- * Persistent message store (JSON)
- * ----------------------------
- */
-function ensureMessagesStore() {
-  if (fs.existsSync(MESSAGES_STORE_FILE)) return
-  fs.mkdirSync(path.dirname(MESSAGES_STORE_FILE), { recursive: true })
-  const initial = { messages: [], updatedAt: Date.now() }
-  fs.writeFileSync(MESSAGES_STORE_FILE, JSON.stringify(initial, null, 2))
-  console.log(`💬 Created messages store: ${MESSAGES_STORE_FILE}`)
-}
-
 function readMessagesStore() {
-  ensureMessagesStore()
-  try { return JSON.parse(fs.readFileSync(MESSAGES_STORE_FILE, 'utf8')) }
-  catch { return { messages: [], updatedAt: Date.now() } }
+  return messagesStoreCache
 }
 
 function writeMessagesStore(store) {
   const next = { ...store, updatedAt: Date.now() }
-  fs.writeFileSync(MESSAGES_STORE_FILE, JSON.stringify(next, null, 2))
+  messagesStoreCache = next
   return next
 }
 
@@ -2713,6 +3655,7 @@ function payloadType(payload) {
 
 function addMessageRecord(rec) {
   const store = readMessagesStore()
+  const msgCfg = getMessageStorageConfig()
   const msg = {
     id: rec.id || makeId('msg'),
     waMsgId: rec.waMsgId ? String(rec.waMsgId) : null,
@@ -2731,10 +3674,12 @@ function addMessageRecord(rec) {
   if (!msg.chatJid) return msg
 
   store.messages.push(msg)
-  if (store.messages.length > MESSAGES_MAX) {
-    store.messages.splice(0, store.messages.length - MESSAGES_MAX)
+  const persistMax = Number(msgCfg.persistMax || 0)
+  if (persistMax > 0 && store.messages.length > persistMax) {
+    store.messages.splice(0, store.messages.length - persistMax)
   }
   writeMessagesStore(store)
+  persistMessageRecordToDb(msg)
   return msg
 }
 
@@ -2746,6 +3691,7 @@ function updateMessageStatus(id, patch) {
   const nextPatch = { ...patch, statusTs: Date.now() };   // ✅ add
   store.messages[idx] = { ...store.messages[idx], ...nextPatch };
   writeMessagesStore(store);
+  patchMessageInDbById(id, { ...nextPatch });
   return store.messages[idx];
 }
 
@@ -2760,6 +3706,7 @@ function updateMessageStatusByWaMsgId(waMsgId, patch) {
   const nextPatch = { ...patch, statusTs: Date.now() }
   store.messages[idx] = { ...store.messages[idx], ...nextPatch }
   writeMessagesStore(store)
+  patchMessageInDbByWaMsgId(waMsgId, { ...nextPatch })
   return store.messages[idx]
 }
 
@@ -2783,6 +3730,7 @@ function linkMessageWaId(messageId, waMsgId) {
 
   store.messages[idx] = { ...prev, waMsgId: waId }
   writeMessagesStore(store)
+  patchMessageInDbById(id, { waMsgId: waId })
   return store.messages[idx]
 }
 
@@ -2800,6 +3748,7 @@ function updateMessageChatJidById(id, chatJidRaw) {
 
   store.messages[idx] = { ...prev, chatJid: nextJid }
   writeMessagesStore(store)
+  patchMessageInDbById(id, { chatJid: nextJid })
   return store.messages[idx]
 }
 
@@ -2943,12 +3892,130 @@ function getQuotedMessage(messageId) {
   return quotedMessageCache.get(id) || null
 }
 
+async function hydrateChatIndexFromPersistentStore(limit = 1000) {
+  try {
+    chatIndex.clear()
+
+    if (pgPool || sqliteDb) {
+      const { rows, error } = await loadChatSummariesFromDb({ pgPool, sqliteDb, limit, normalizeJid })
+      if (error) {
+        console.warn(`⚠️ Failed to load chat summaries from ${pgPool ? 'PostgreSQL' : 'SQLite'}:`, error?.message)
+      } else {
+        for (const r of rows) {
+          chatIndex.set(r.chatJid, {
+            chatJid: r.chatJid,
+            isGroup: Boolean(r.isGroup),
+            count: Number(r.count || 0),
+            lastTs: Number(r.lastTs || 0),
+            lastText: String(r.lastText || ''),
+            lastSenderJid: String(r.lastSenderJid || '')
+          })
+        }
+        console.log(`💾 Hydrated ${chatIndex.size} chat summaries (${pgPool ? 'postgres' : 'sqlite'})`)
+        return
+      }
+    }
+
+    const store = readMessagesStore()
+    const rows = Array.isArray(store.messages) ? store.messages : []
+    for (const m of rows) {
+      const jid = normalizeJid(m?.chatJid)
+      if (!jid) continue
+      const prev = chatIndex.get(jid) || { chatJid: jid, isGroup: Boolean(m?.isGroup), count: 0, lastTs: 0, lastText: '', lastSenderJid: '' }
+      const ts = Number(m?.ts || 0)
+      const useLatest = ts >= Number(prev.lastTs || 0)
+      chatIndex.set(jid, {
+        chatJid: jid,
+        isGroup: Boolean(prev.isGroup || m?.isGroup),
+        count: Number(prev.count || 0) + 1,
+        lastTs: Math.max(Number(prev.lastTs || 0), ts),
+        lastText: useLatest ? String(m?.text || '') : String(prev.lastText || ''),
+        lastSenderJid: useLatest ? String(m?.senderJid || '') : String(prev.lastSenderJid || '')
+      })
+    }
+    console.log(`💾 Hydrated ${chatIndex.size} chat summaries (json fallback)`)
+  } catch (e) {
+    console.warn('⚠️ Chat summary hydration failed:', e?.message)
+  }
+}
+
 
 /**
  * Bootstrap: load last N messages from persistent store into memory
  */
-function hydrateInMemoryFromStore() {
+async function hydrateInMemoryFromStore() {
+  // DISABLED: Loading 20k+ messages synchronously from SQLite blocks the event loop
+  // Messages will be loaded lazily when accessed via the API
+  console.log('⏭️ Message hydration skipped (lazy-loading enabled)')
+  setTimeout(() => {
+    hydrateChatIndexFromPersistentStore(1000).catch((e) => {
+      console.warn('⚠️ Background chat summary hydration failed:', e?.message)
+    })
+  }, 0)
+  return
+
   try {
+    if (pgPool) {
+      const out = await pgPool.query(
+        `SELECT id, wa_msg_id, ts, direction, chat_jid, sender_jid, is_group, type, text_content, media, status, status_ts, quoted_message_id
+         FROM messages
+         ORDER BY ts DESC
+         LIMIT $1`,
+        [MESSAGES_MEMORY_LIMIT]
+      )
+      const rows = (out.rows || []).map(rowToMessage).filter(Boolean).reverse()
+      console.log(`💾 Hydrating ${rows.length} messages into memory cache (postgres)...`)
+      for (const m of rows) {
+        upsertRecentMessageSilent({
+          ts: m.ts,
+          chatJid: m.chatJid,
+          senderJid: m.senderJid,
+          id: m.id,
+          waMsgId: m.waMsgId || null,
+          isGroup: Boolean(m.isGroup),
+          text: m.text || '',
+          direction: m.direction || 'in',
+          status: m.status || null,
+          statusTs: m.statusTs || null,
+          type: m.type || 'text',
+          media: m.media || null,
+          quotedMessageId: m.quotedMessageId || null,
+        })
+      }
+      console.log(`💾 Hydrated ${rows.length} messages into memory cache (postgres)`)
+      return
+    }
+
+    if (sqliteDb) {
+      const stmt = sqliteDb.prepare(
+        `SELECT id, wa_msg_id, ts, direction, chat_jid, sender_jid, is_group, type, text_content, media, status, status_ts, quoted_message_id
+         FROM messages
+         ORDER BY ts DESC
+         LIMIT ?`
+      )
+      const rows = (stmt.all(MESSAGES_MEMORY_LIMIT) || []).map(rowToMessage).filter(Boolean).reverse()
+      console.log(`💾 Hydrating ${rows.length} messages into memory cache (sqlite)...`)
+      for (const m of rows) {
+        upsertRecentMessageSilent({
+          ts: m.ts,
+          chatJid: m.chatJid,
+          senderJid: m.senderJid,
+          id: m.id,
+          waMsgId: m.waMsgId || null,
+          isGroup: Boolean(m.isGroup),
+          text: m.text || '',
+          direction: m.direction || 'in',
+          status: m.status || null,
+          statusTs: m.statusTs || null,
+          type: m.type || 'text',
+          media: m.media || null,
+          quotedMessageId: m.quotedMessageId || null,
+        })
+      }
+      console.log(`💾 Hydrated ${rows.length} messages into memory cache (sqlite)`)
+      return
+    }
+
     const store = readMessagesStore()
     const all = Array.isArray(store.messages) ? store.messages : []
     const tail = all.slice(-MESSAGES_MEMORY_LIMIT)
@@ -3008,38 +4075,48 @@ function upsertWaContactName(jidRaw, nameRaw) {
 
 let sock = null
 let relinkInProgress = false
-let suppressNextReconnect = false
 let activeSocketToken = 0
 let lastAutoRelinkAt = 0
+let reconnectAttemptCount = 0
+let lastNoQrRecoveryAt = 0
+let startWhatsAppInProgress = false
+let walHandshakeInProgress = false  // true between makeWASocket() and first open/close event — suppresses DB key writes
+let preferLatestWaVersion = false   // auto-enabled after repeated 405 failures
 
-function clearAuthDir() {
-  fs.mkdirSync(AUTH_DIR, { recursive: true })
-  const entries = fs.readdirSync(AUTH_DIR)
-  for (const name of entries) {
-    const full = path.join(AUTH_DIR, name)
-    fs.rmSync(full, { recursive: true, force: true })
-  }
-  console.log(`🧹 Cleared auth directory (${entries.length} item(s))`)
+async function clearAuthStorage() {
+  await clearAuthFromDb().catch((e) => { console.warn('⚠️ Failed to clear auth from DB:', e?.message) })
+  console.log('🧹 Cleared auth credentials from DB')
 }
 
-async function triggerRelink(reason = 'manual') {
+async function triggerRelink(reason = 'manual', options = {}) {
+  const clearAuth = Boolean(options?.clearAuth)
   if (relinkInProgress) return { ok: false, skipped: true, reason: 'already-in-progress' }
+
+  logDiag('warn', 'wa.relink.requested', '♻️ Relink requested', { reason, clearAuth })
 
   relinkInProgress = true
   connectionStatus = 'relinking'
   lastQR = null
+  lastQRPngBuffer = null
+  lastQRPngBufferVersion = 0
+  qrPngBuildPromise = null
+  lastQRDataUrl = ''
+  lastQRUpdatedAt = 0
   broadcast('status', { status: connectionStatus, hasQR: false, reason })
 
   try {
-    suppressNextReconnect = true
     try { sock?.ws?.close?.() } catch {}
     try { sock?.end?.() } catch {}
     sock = null
 
     await new Promise(resolve => setTimeout(resolve, 300))
 
-    clearAuthDir()
-    await startWhatsApp()
+    if (clearAuth) {
+      await clearAuthStorage()
+      logDiag('warn', 'wa.auth.cleared', '🧹 WA auth cleared for force re-pair', { reason })
+    }
+    // Start WhatsApp connection asynchronously (don't wait for it to complete)
+    startWhatsApp().catch(e => console.warn('⚠️ startWhatsApp failed:', e?.message))
     return { ok: true }
   } finally {
     relinkInProgress = false
@@ -3185,6 +4262,19 @@ function adminKeyMiddleware(req, res, next) {
   return res.status(401).json({ ok: false, error: 'Unauthorized' })
 }
 
+function requireApiToggle(toggleKey = '', label = 'API') {
+  return (req, res, next) => {
+    const cfg = getApiConfig()
+    if (!cfg.enabled) {
+      return res.status(503).json({ ok: false, error: 'Public API disabled' })
+    }
+    if (toggleKey && !cfg[toggleKey]) {
+      return res.status(503).json({ ok: false, error: `${label} disabled` })
+    }
+    return next()
+  }
+}
+
 function hasValidAdminApiKey(req) {
   if (!REQUIRE_ADMIN_KEY) return false
   const key = String(req.headers['x-admin-key'] || '').trim()
@@ -3317,17 +4407,8 @@ function isIpAllowed(ip, allowList = ADMIN_IP_ALLOWLIST) {
   return allowList.some(rule => needle === rule || needle.startsWith(`${rule}:`) || needle.endsWith(`:${rule}`))
 }
 
-function ensureAdminAuditStore() {
-  if (fs.existsSync(ADMIN_AUDIT_FILE)) return
-  fs.mkdirSync(path.dirname(ADMIN_AUDIT_FILE), { recursive: true })
-  writeJsonFileAtomic(ADMIN_AUDIT_FILE, { items: [], updatedAt: Date.now() })
-}
-
 function readAdminAuditStore() {
-  ensureAdminAuditStore()
-  const raw = readJsonFileSafe(ADMIN_AUDIT_FILE, { items: [], updatedAt: Date.now() })
-  const items = Array.isArray(raw.items) ? raw.items : []
-  return { items, updatedAt: Number(raw.updatedAt || Date.now()) }
+  return adminAuditStoreCache
 }
 
 function appendAdminAuditLog(entry = {}) {
@@ -3352,7 +4433,8 @@ function appendAdminAuditLog(entry = {}) {
       store.items.splice(0, store.items.length - ADMIN_AUDIT_MAX_ITEMS)
     }
     store.updatedAt = Date.now()
-    writeJsonFileAtomic(ADMIN_AUDIT_FILE, store)
+    adminAuditStoreCache = store
+    writeKvToDb('admin_audit', store).catch(() => {})
   } catch (e) {
     console.warn('⚠️ Failed to append admin audit log:', e?.message)
   }
@@ -3808,6 +4890,12 @@ const upload = multer({
  */
 let connectionStatus = 'disconnected'
 let lastQR = null
+let lastQRUpdatedAt = 0
+let lastQrTerminalLogAt = 0
+let lastQRPngBuffer = null
+let lastQRPngBufferVersion = 0
+let qrPngBuildPromise = null
+let lastQRDataUrl = ''
 
 // SSE
 const sseClients = new Set()
@@ -3850,32 +4938,136 @@ function broadcastAdminMessageUpdate(chatJid, message, summary) {
 }
 
 async function startWhatsApp() {
+  if (startWhatsAppInProgress) return
+  startWhatsAppInProgress = true
+
+  try {
   connectionStatus = 'connecting'
-  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR)
+  logDiag('info', 'wa.connect.start', '🔌 Starting WhatsApp connection', { reconnectAttemptCount })
+  const { state, saveCreds } = await getAuthStateFromDb()
+  
+  // Preload all auth keys into memory cache BEFORE handshake to avoid sync DB hits
+  await preloadAuthKeysToCache()
 
   let waVersion = undefined
-  try {
-    const info = await fetchLatestBaileysVersion()
-    if (Array.isArray(info?.version) && info.version.length) {
-      waVersion = info.version
-      console.log('📦 Using WA Web version:', waVersion.join('.'), '| isLatest:', Boolean(info?.isLatest))
+  const forceLatestWaVersion = String(process.env.WA_FORCE_LATEST_WEB_VERSION || '').trim() === '1' || preferLatestWaVersion
+  if (forceLatestWaVersion) {
+    try {
+      const info = await fetchLatestBaileysVersion()
+      if (Array.isArray(info?.version) && info.version.length) {
+        waVersion = info.version
+        console.log('📦 Using WA Web version:', waVersion.join('.'), '| isLatest:', Boolean(info?.isLatest))
+      }
+    } catch (e) {
+      console.warn('⚠️ Failed to fetch latest WA Web version:', e?.message)
     }
-  } catch (e) {
-    console.warn('⚠️ Failed to fetch latest WA Web version:', e?.message)
+  } else {
+    console.log('📦 Using Baileys default WA Web version (WA_FORCE_LATEST_WEB_VERSION!=1)')
   }
 
   sock = makeWASocket({
     auth: state,
     logger: P({ level: 'silent' }),
     browser: resolveBaileysBrowser(),
-    version: waVersion,
+    ...(waVersion ? { version: waVersion } : {}),
     getMessage: async () => undefined
   })
 
   const socketToken = ++activeSocketToken
   const thisSock = sock
+  walHandshakeInProgress = true  // suppress DB writes until open/close fires
 
-  sock.ev.on('creds.update', saveCreds)
+  const noQrGuard = setTimeout(async () => {
+    try {
+      if (sock !== thisSock || socketToken !== activeSocketToken) return
+      const noQr = !lastQR && lastQRUpdatedAt <= 0
+      const stillNotOpen = connectionStatus !== 'open'
+      if (!noQr || !stillNotOpen) return
+
+      const now = Date.now()
+      if (now - lastNoQrRecoveryAt < 60000) return
+      lastNoQrRecoveryAt = now
+      console.log('⚠️ No QR produced within startup window. Restarting WA socket...')
+      try {
+        await triggerRelink('no-qr-timeout')
+      } catch (e) {
+        console.warn('❌ no-qr timeout relink failed:', e?.message)
+      }
+    } catch {}
+  }, 45000)
+  let credsPersistTimer = null
+  let credsPersistRunning = false
+  let credsPersistPending = false
+  
+  // Batch auth key writes to avoid blocking on every crypto event
+  let keysPersistTimer = null
+  let keysPersistPending = null
+
+  const flushCredsPersist = async () => {
+    if (credsPersistRunning) {
+      credsPersistPending = true
+      return
+    }
+
+    credsPersistRunning = true
+    try {
+      await saveCreds()
+    } catch (e) {
+      console.warn('⚠️ Failed to persist WA creds:', e?.message)
+    } finally {
+      credsPersistRunning = false
+      if (credsPersistPending) {
+        credsPersistPending = false
+        queueCredsPersist()
+      }
+    }
+  }
+
+  const queueCredsPersist = () => {
+    if (credsPersistTimer) return
+    credsPersistTimer = setTimeout(() => {
+      credsPersistTimer = null
+      flushCredsPersist().catch(() => {})
+    }, 500)
+  }
+  
+  const flushKeysPersist = async () => {
+    if (!keysPersistPending) return
+    const toWrite = keysPersistPending
+    keysPersistPending = null
+    // Yield to the event loop before the synchronous SQLite transaction runs
+    await new Promise(resolve => setImmediate(resolve))
+    await writeAuthKeysToDb(toWrite).catch(e => console.warn('⚠️ auth keys flush error:', e?.message))
+  }
+  
+  const queueKeysPersist = (data) => {
+    // Always update in-memory cache (no I/O)
+    keysPersistPending = keysPersistPending || {}
+    for (const [type, vals] of Object.entries(data || {})) {
+      if (!keysPersistPending[type]) keysPersistPending[type] = {}
+      Object.assign(keysPersistPending[type], vals || {})
+    }
+    
+    // During WA handshake, skip scheduling DB writes entirely.
+    // Keys stay in memory and get flushed in one batch after open/close fires.
+    if (walHandshakeInProgress) return
+    
+    // Post-handshake: debounce DB writes at 1000ms to avoid hammering SQLite
+    if (keysPersistTimer) clearTimeout(keysPersistTimer)
+    keysPersistTimer = setTimeout(() => {
+      keysPersistTimer = null
+      flushKeysPersist().catch(() => {})
+    }, 1000)
+  }
+  
+  // Intercept keys.set to batch the writes
+  const originalKeySet = state.keys.set
+  state.keys.set = async (data) => {
+    await originalKeySet(data)
+    queueKeysPersist(data)
+  }
+
+  sock.ev.on('creds.update', queueCredsPersist)
 
   sock.ev.on('connection.update', async (update) => {
     if (sock !== thisSock || socketToken !== activeSocketToken) return
@@ -3883,37 +5075,58 @@ async function startWhatsApp() {
     const { connection, lastDisconnect, qr } = update
 
     if (qr) {
+      const qrChanged = qr !== lastQR
       lastQR = qr
-      console.log('📲 Scan QR to pair (WhatsApp > Linked devices):')
-      qrcode.generate(qr, { small: true })
-      broadcast('qr', { qr })
-      broadcast('status', { status: connectionStatus, hasQR: true })
+
+      if (qrChanged) {
+        reconnectAttemptCount = 0
+        lastQRUpdatedAt = Date.now()
+        lastQRPngBuffer = null
+        lastQRPngBufferVersion = 0
+        qrPngBuildPromise = null
+        lastQRDataUrl = ''
+
+        const now = Date.now()
+        if (now - lastQrTerminalLogAt > 1500) {
+          lastQrTerminalLogAt = now
+          console.log('📲 Scan QR to pair (WhatsApp > Linked devices):')
+          qrcode.generate(qr, { small: true })
+        }
+
+        broadcast('qr', { qr, qrUpdatedAt: lastQRUpdatedAt })
+        broadcast('status', { status: connectionStatus, hasQR: true, qrUpdatedAt: lastQRUpdatedAt })
+      }
     }
 
     if (connection === 'open') {
+      clearTimeout(noQrGuard)
+      walHandshakeInProgress = false
+      if (keysPersistPending) flushKeysPersist().catch(() => {})
+      reconnectAttemptCount = 0
       connectionStatus = 'open'
       lastQR = null
+      lastQRUpdatedAt = 0
+      lastQRPngBuffer = null
+      lastQRPngBufferVersion = 0
+      qrPngBuildPromise = null
+      lastQRDataUrl = ''
       console.log('✅ WhatsApp connected')
+      logDiag('info', 'wa.connect.open', '✅ WhatsApp connected', { reconnectAttemptCount })
       try { await refreshGroups() } catch (e) { console.warn('⚠️ Group cache refresh failed:', e?.message) }
-      broadcast('status', { status: connectionStatus, hasQR: false })
+      broadcast('status', { status: connectionStatus, hasQR: false, qrUpdatedAt: lastQRUpdatedAt })
     }
 
     if (connection === 'close') {
+      clearTimeout(noQrGuard)
+      walHandshakeInProgress = false
+      if (keysPersistPending) flushKeysPersist().catch(() => {})
       connectionStatus = 'disconnected'
-      const statusCode = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.statusCode || lastDisconnect?.error?.data?.statusCode
-      const disconnectReason = lastDisconnect?.error?.message || lastDisconnect?.error?.output?.payload?.message || 'unknown'
-      const disconnectData = lastDisconnect?.error?.data ? JSON.stringify(lastDisconnect.error.data) : ''
+      const { statusCode, reason: disconnectReason, data: disconnectData } = parseDisconnectDetails(lastDisconnect)
+      reconnectAttemptCount += 1
 
       if (relinkInProgress) {
         console.log('ℹ️ Reconnect suppressed (relink in progress)')
-        broadcast('status', { status: connectionStatus, hasQR: Boolean(lastQR), relinking: true })
-        return
-      }
-
-      if (suppressNextReconnect) {
-        suppressNextReconnect = false
-        console.log('ℹ️ Reconnect suppressed (manual relink in progress)')
-        broadcast('status', { status: connectionStatus, hasQR: Boolean(lastQR) })
+        broadcast('status', { status: connectionStatus, hasQR: Boolean(lastQR), relinking: true, qrUpdatedAt: lastQRUpdatedAt })
         return
       }
 
@@ -3921,13 +5134,13 @@ async function startWhatsApp() {
         const now = Date.now()
         if (now - lastAutoRelinkAt < 8000) {
           console.log('ℹ️ Logged-out relink throttled')
-          broadcast('status', { status: connectionStatus, hasQR: false, relinking: true })
+          broadcast('status', { status: connectionStatus, hasQR: false, relinking: true, qrUpdatedAt: lastQRUpdatedAt })
           return
         }
         lastAutoRelinkAt = now
 
         console.log('⚠️ Logged out detected. Auto relink initiated...')
-        broadcast('status', { status: connectionStatus, hasQR: false, relinking: true })
+        broadcast('status', { status: connectionStatus, hasQR: false, relinking: true, qrUpdatedAt: lastQRUpdatedAt })
         try {
           await triggerRelink('logged-out')
         } catch (e) {
@@ -3936,13 +5149,73 @@ async function startWhatsApp() {
         return
       }
 
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut
+      if (Number(statusCode) === 405) {
+        // 405 is often transient WA-side connection failure/rate-limiting.
+        // Keep auth intact. Auth reset is manual-only from Pairing > Force Re-pair.
+        preferLatestWaVersion = true
+
+        const retryDelay = computeStatus405DelayMs(reconnectAttemptCount)
+        console.log(`⚠️ Status 405 detected. Retrying in ${Math.round(retryDelay / 1000)}s (auth preserved, latest WA version preferred).`)
+        broadcast('status', { status: connectionStatus, hasQR: Boolean(lastQR), qrUpdatedAt: lastQRUpdatedAt })
+
+        // Safety valve: for sustained 405 without QR, restart socket with long cooldown.
+        const now = Date.now()
+        const noQrYet = !lastQR && lastQRUpdatedAt <= 0
+        if (noQrYet && reconnectAttemptCount >= 8 && now - lastNoQrRecoveryAt >= 10 * 60 * 1000) {
+          lastNoQrRecoveryAt = now
+          console.log('⚠️ Sustained 405 failures without QR. Performing cooled-down socket restart...')
+          try {
+            await triggerRelink('status-405-sustained-no-qr')
+          } catch (e) {
+            console.warn('❌ 405 sustained recovery relink failed:', e?.message)
+          }
+          return
+        }
+
+        setTimeout(() => {
+          startWhatsApp().catch(e => console.warn('⚠️ startWhatsApp (405 retry) failed:', e?.message))
+        }, retryDelay)
+        return
+      }
+
+      const shouldReconnect = statusCode !== DisconnectReason.loggedOut && Number(statusCode) !== 405
 
       console.log('❌ WhatsApp connection closed. Reconnect?', shouldReconnect, '| statusCode:', statusCode ?? 'n/a', '| reason:', disconnectReason, disconnectData ? `| data: ${disconnectData}` : '')
-      broadcast('status', { status: connectionStatus, hasQR: Boolean(lastQR) })
+      logDiag('warn', 'wa.connect.close', '❌ WhatsApp connection closed', {
+        shouldReconnect,
+        statusCode: statusCode ?? null,
+        reason: disconnectReason || 'unknown',
+        reconnectAttemptCount
+      })
+      broadcast('status', { status: connectionStatus, hasQR: Boolean(lastQR), qrUpdatedAt: lastQRUpdatedAt })
 
-      if (shouldReconnect) startWhatsApp()
-      else console.log('⚠️ Logged out. Auto relink failed; manual intervention may be required.')
+      const now = Date.now()
+      const noQrYet = !lastQR && lastQRUpdatedAt <= 0
+      if (noQrYet && reconnectAttemptCount >= 4 && now - lastNoQrRecoveryAt >= 60000) {
+        lastNoQrRecoveryAt = now
+        console.log('⚠️ Repeated reconnect failures without QR. Restarting WA socket...')
+        try {
+          await triggerRelink('no-qr-repeated-failures')
+        } catch (e) {
+          console.warn('❌ no-qr repeated-failure relink failed:', e?.message)
+        }
+        return
+      }
+
+      if (shouldReconnect) {
+        const retryDelayMs = computeReconnectDelayMs(statusCode, reconnectAttemptCount)
+        console.log(`🔄 Reconnect #${reconnectAttemptCount} in ${Math.round(retryDelayMs / 1000)}s (status: ${statusCode ?? 'n/a'})`)
+        setTimeout(() => {
+          startWhatsApp().catch((e) => console.warn('⚠️ startWhatsApp retry failed:', e?.message))
+        }, retryDelayMs)
+      }
+      else {
+        if (Number(statusCode) === 405) {
+          console.log('⚠️ Reconnect halted after status 405 (Connection Failure). Trigger a manual re-pair from Admin > Pairing.')
+        } else {
+          console.log('⚠️ Logged out. Auto relink failed; manual intervention may be required.')
+        }
+      }
     }
   })
 
@@ -3970,146 +5243,292 @@ async function startWhatsApp() {
     }
   })
 
-  // Inbound messages
-  sock.ev.on('messages.upsert', async ({ messages }) => {
-  const msg = messages?.[0]
-  if (!msg?.message) return
+  // Initial MD history sync after fresh login/pair.
+  // This populates contacts/chats/messages even before any new inbound event arrives.
+  sock.ev.on('messaging-history.set', async (payload = {}) => {
+    try {
+      const contacts = Array.isArray(payload?.contacts) ? payload.contacts : []
+      const allMessages = Array.isArray(payload?.messages) ? payload.messages : []
+      const syncLimit = Math.max(1000, Number(WA_HISTORY_SYNC_MAX || 15000))
+      const messages = allMessages.length > syncLimit ? allMessages.slice(-syncLimit) : allMessages
 
-  const rawChatJid = msg.key.remoteJid
-  const group = isGroupJid(rawChatJid)
-  const chatJid = group ? normalizeJid(rawChatJid) : resolvePreferredChatJid(rawChatJid)
+      for (const c of contacts) {
+        const jid = c?.id || c?.jid || c?.remoteJid
+        const name = c?.notify || c?.verifiedName || c?.name || c?.vname || ''
+        upsertWaContactName(jid, name)
+      }
 
-  // ignore outgoing events here (we store outbound ourselves)
-  if (msg.key.fromMe) return
+      let processed = 0
+      for (const msg of messages) {
+        if (!msg?.message) continue
 
-  const senderJid = msg.key.participant || msg.key.remoteJid
-  upsertWaContactName(senderJid, msg.pushName || '')
-  try {
-    const displayName = resolveInboundDisplayName(senderJid, msg.pushName || '')
-    autoAddInboundContact(senderJid, displayName)
-  } catch (e) {
-    console.warn('⚠️ Auto-add contact failed:', e?.message)
-  }
-  const msgId = msg.key.id || makeId('in')
+        const waMsgId = String(msg?.key?.id || '').trim()
+        const rawChatJid = msg?.key?.remoteJid
+        const isGroup = isGroupJid(rawChatJid)
+        // IMPORTANT: during history sync, avoid resolvePreferredChatJid()
+        // because it hits readContactsStore() and is too expensive per message.
+        const chatJid = normalizeJid(rawChatJid)
+        if (!chatJid) continue
 
-  // Determine type + text
-  const textRaw = extractTextMessage(msg)
-  const hasImage = Boolean(msg.message?.imageMessage)
-  const hasDoc = Boolean(msg.message?.documentMessage)
-  const hasVideo = Boolean(msg.message?.videoMessage)
-  const hasGif = Boolean(msg.message?.videoMessage?.gifPlayback)
-  const hasAudio = Boolean(msg.message?.audioMessage)
-  const hasVoiceNote = Boolean(msg.message?.audioMessage?.ptt)
+        const fromMe = Boolean(msg?.key?.fromMe)
+        const senderJid = fromMe
+          ? (normalizeJid(sock?.user?.id || '') || chatJid)
+          : (msg?.key?.participant || msg?.key?.remoteJid || '')
 
-  console.log('📩 New message:', { chatJid, rawChatJid, senderJid, textRaw, hasImage, hasDoc, hasVideo, hasGif, hasAudio, hasVoiceNote })
-  let type = 'text'
-  if (hasImage) type = 'image'
-  else if (hasDoc) type = 'document'
-  else if (hasVideo) type = 'video'
-  else if (hasVoiceNote) type = 'voice-note'
-  else if (hasAudio) type = 'audio'
+        // Handle protocol-level revoke events from history sync by flagging
+        // the original message as deleted, while preserving its original text/media.
+        const histProtocol = msg?.message?.protocolMessage
+        const histProtocolType = Number(histProtocol?.type)
+        const histRevokedTargetId = String(histProtocol?.key?.id || '').trim()
+        if (histRevokedTargetId && (histProtocolType === 0 || String(histProtocol?.type || '').toUpperCase() === 'REVOKE')) {
+          const deleted = updateMessageStatusByAnyId(histRevokedTargetId, { status: 'deleted' })
+          if (deleted) upsertRecentMessageSilent(deleted)
+          continue
+        }
 
-  // Caption may be empty → still store placeholder
-  let text = ''
-  if (type === 'text') text = String(textRaw || '').trim()
-  if (type === 'image') text = String(msg.message?.imageMessage?.caption || '').trim() || '[image]'
-  if (type === 'document') {
-    const fn = msg.message?.documentMessage?.fileName
-    text = fn ? `[document] ${fn}` : '[document]'
-  }
-  if (type === 'video') {
-    text = String(msg.message?.videoMessage?.caption || '').trim() || (hasGif ? '[gif]' : '[video]')
-  }
-  if (type === 'voice-note') text = '[voice note]'
-  if (type === 'audio') text = '[audio]'
+        const textRaw = extractTextMessage(msg)
+        const hasImage = Boolean(msg.message?.imageMessage)
+        const hasDoc = Boolean(msg.message?.documentMessage)
+        const hasVideo = Boolean(msg.message?.videoMessage)
+        const hasGif = Boolean(msg.message?.videoMessage?.gifPlayback)
+        const hasAudio = Boolean(msg.message?.audioMessage)
+        const hasVoiceNote = Boolean(msg.message?.audioMessage?.ptt)
 
-  // If it's a plain text message and still empty, skip
-  if (type === 'text' && !text) return
+        let type = 'text'
+        if (hasImage) type = 'image'
+        else if (hasDoc) type = 'document'
+        else if (hasVideo) type = 'video'
+        else if (hasVoiceNote) type = 'voice-note'
+        else if (hasAudio) type = 'audio'
 
-  console.log(`📩 ${chatJid}: ${text}`)
+        let text = ''
+        if (type === 'text') text = String(textRaw || '').trim()
+        if (type === 'image') text = String(msg.message?.imageMessage?.caption || '').trim() || '[image]'
+        if (type === 'document') {
+          const fn = msg.message?.documentMessage?.fileName
+          text = fn ? `[document] ${fn}` : '[document]'
+        }
+        if (type === 'video') {
+          text = String(msg.message?.videoMessage?.caption || '').trim() || (hasGif ? '[gif]' : '[video]')
+        }
+        if (type === 'voice-note') text = '[voice note]'
+        if (type === 'audio') text = '[audio]'
+        if (type === 'text' && !text) continue
 
-  // If media, download it so the UI can preview
-  let media = null
-  try {
-    if (type === 'image') media = await saveInboundMedia(msg, 'image', msgId)
-    if (type === 'document') media = await saveInboundMedia(msg, 'document', msgId)
-    if (type === 'video') media = await saveInboundMedia(msg, 'video', msgId)
-  } catch (e) {
-    console.warn('⚠️ Failed to download inbound media:', e?.message)
-  }
+        const tsMs = Number(msg?.messageTimestamp || 0) > 0
+          ? Number(msg.messageTimestamp) * 1000
+          : Date.now()
 
-  const rec = {
-    ts: Date.now(),
-    chatJid,
-    senderJid,
-    id: msgId,
-    isGroup: group,
-    text,
-    direction: 'in',
-    status: null,
-    type,
-    media
-  }
+        const rec = {
+          id: waMsgId || makeId(fromMe ? 'out' : 'in'),
+          waMsgId: waMsgId || null,
+          ts: tsMs,
+          chatJid,
+          senderJid,
+          isGroup,
+          direction: fromMe ? 'out' : 'in',
+          status: fromMe ? 'sent' : null,
+          type,
+          text,
+          media: null
+        }
 
-  rememberQuotedMessage(msgId, msg)
+        addMessageRecord(rec)
+        upsertRecentMessageSilent(rec)
+        processed += 1
 
-// Persist + memory
-addMessageRecord(rec)      // your persistent store
-upsertRecentMessage(rec)   // we’ll add this next
+        if (processed % 250 === 0) {
+          await new Promise(resolve => setImmediate(resolve))
+        }
+      }
 
-// Forward to n8n (if enabled + allowed by rules)
-try {
-  const textForRules = (type === 'text' ? text : (textRaw ? String(textRaw).trim() : ''))
-  if (shouldForwardToN8n(rec, textForRules)) {
-    enqueueN8nEvent(buildN8nEvent(rec, textForRules))
-  }
-} catch (e) {
-  console.warn('⚠️ n8n forward (skipped):', e?.message)
-}
-
-// response rules (preferred)
-let handledByRule = false
-try {
-  const matchedRule = findMatchingResponseRule({
-    chatJid,
-    isGroup: group,
-    text,
-    rawText: textRaw,
-    type,
-    voiceNote: hasVoiceNote,
-    audio: hasAudio
+      if (processed > 0) {
+        if (allMessages.length > messages.length) {
+          const msg = `💾 History sync ingested ${processed}/${allMessages.length} message(s) (capped by WA_HISTORY_SYNC_MAX=${syncLimit})`
+          console.log(msg)
+          logDiag('info', 'wa.history.ingested', msg, { processed, total: allMessages.length, capped: true, syncLimit })
+        } else {
+          const msg = `💾 History sync ingested ${processed} message(s)`
+          console.log(msg)
+          logDiag('info', 'wa.history.ingested', msg, { processed, total: allMessages.length, capped: false, syncLimit })
+        }
+      }
+    } catch (e) {
+      console.warn('⚠️ messaging-history.set handling failed:', e?.message)
+      logDiag('warn', 'wa.history.error', '⚠️ messaging-history.set handling failed', { error: e?.message || 'unknown' })
+    }
   })
 
-  if (matchedRule) {
-    await queueAutoReplyMessage(chatJid, group, matchedRule.replyText, 'rule', msgId)
-    handledByRule = true
-  }
-} catch (e) {
-  console.warn('⚠️ Response rule handling failed:', e?.message)
-}
+  // Inbound messages
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    const list = Array.isArray(messages) ? messages : []
+    const isLiveNotify = String(type || '').toLowerCase() === 'notify'
 
-// auto reply logic (optional / legacy fallback)
-const autoReplyCfg = getAutoReplyConfig()
-if (!handledByRule && autoReplyCfg.enabled) {
-  if (autoReplyCfg.scope === 'dm' && group) return
-  if (autoReplyCfg.scope === 'group' && !group) return
+    for (const msg of list) {
+      if (!msg?.message) continue
 
-  let textToMatch = (type === 'text' ? text : (textRaw ? String(textRaw).trim() : ''))
-  if (group) {
-    const { ok, text } = stripPrefixByValue(textToMatch, autoReplyCfg.groupPrefix)
-    if (!ok) return
-    textToMatch = text
-    if (!textToMatch) return
-  }
+      const rawChatJid = msg.key.remoteJid
+      const group = isGroupJid(rawChatJid)
+      const chatJid = group ? normalizeJid(rawChatJid) : resolvePreferredChatJid(rawChatJid)
 
-  if (!matchesAutoReply(textToMatch)) return
+      // ignore outgoing events here (we store outbound ourselves)
+      if (msg.key.fromMe) continue
 
-  const last = lastAutoReplyAt.get(chatJid) || 0
-  if (Date.now() - last < autoReplyCfg.cooldownMs) return
-  lastAutoReplyAt.set(chatJid, Date.now())
+      const senderJid = msg.key.participant || msg.key.remoteJid
+      upsertWaContactName(senderJid, msg.pushName || '')
 
-  await queueAutoReplyMessage(chatJid, group, autoReplyCfg.text, 'auto', msgId)
-  } // AUTO_REPLY_ENABLED
+      // Handle protocol-level revoke events by flagging the original message
+      // as deleted, while preserving its original text/media in storage.
+      const protocol = msg?.message?.protocolMessage
+      const protocolType = Number(protocol?.type)
+      const revokedTargetId = String(protocol?.key?.id || '').trim()
+      if (revokedTargetId && (protocolType === 0 || String(protocol?.type || '').toUpperCase() === 'REVOKE')) {
+        const deleted = updateMessageStatusByAnyId(revokedTargetId, { status: 'deleted' })
+        if (deleted) upsertRecentMessage(deleted)
+        continue
+      }
+
+      if (isLiveNotify) {
+        try {
+          const displayName = resolveInboundDisplayName(senderJid, msg.pushName || '')
+          autoAddInboundContact(senderJid, displayName)
+        } catch (e) {
+          console.warn('⚠️ Auto-add contact failed:', e?.message)
+        }
+      }
+      const msgId = msg.key.id || makeId('in')
+
+      // Determine type + text
+      const textRaw = extractTextMessage(msg)
+      const hasImage = Boolean(msg.message?.imageMessage)
+      const hasDoc = Boolean(msg.message?.documentMessage)
+      const hasVideo = Boolean(msg.message?.videoMessage)
+      const hasGif = Boolean(msg.message?.videoMessage?.gifPlayback)
+      const hasAudio = Boolean(msg.message?.audioMessage)
+      const hasVoiceNote = Boolean(msg.message?.audioMessage?.ptt)
+
+      console.log('📩 New message:', { chatJid, rawChatJid, senderJid, textRaw, hasImage, hasDoc, hasVideo, hasGif, hasAudio, hasVoiceNote })
+      let type = 'text'
+      if (hasImage) type = 'image'
+      else if (hasDoc) type = 'document'
+      else if (hasVideo) type = 'video'
+      else if (hasVoiceNote) type = 'voice-note'
+      else if (hasAudio) type = 'audio'
+
+      // Caption may be empty → still store placeholder
+      let text = ''
+      if (type === 'text') text = String(textRaw || '').trim()
+      if (type === 'image') text = String(msg.message?.imageMessage?.caption || '').trim() || '[image]'
+      if (type === 'document') {
+        const fn = msg.message?.documentMessage?.fileName
+        text = fn ? `[document] ${fn}` : '[document]'
+      }
+      if (type === 'video') {
+        text = String(msg.message?.videoMessage?.caption || '').trim() || (hasGif ? '[gif]' : '[video]')
+      }
+      if (type === 'voice-note') text = '[voice note]'
+      if (type === 'audio') text = '[audio]'
+
+      // If it's a plain text message and still empty, skip
+      if (type === 'text' && !text) continue
+
+      console.log(`📩 ${chatJid}: ${text}`)
+
+      // If media, download it so the UI can preview
+      let media = null
+      if (isLiveNotify) {
+        try {
+          if (type === 'image') media = await saveInboundMedia(msg, 'image', msgId)
+          if (type === 'document') media = await saveInboundMedia(msg, 'document', msgId)
+          if (type === 'video') media = await saveInboundMedia(msg, 'video', msgId)
+        } catch (e) {
+          console.warn('⚠️ Failed to download inbound media:', e?.message)
+        }
+      }
+
+      const msgTs = Number(msg?.messageTimestamp || 0) > 0
+        ? Number(msg.messageTimestamp) * 1000
+        : Date.now()
+
+      const rec = {
+        ts: msgTs,
+        chatJid,
+        senderJid,
+        id: msgId,
+        waMsgId: msg.key.id ? String(msg.key.id) : null,
+        isGroup: group,
+        text,
+        direction: 'in',
+        status: null,
+        type,
+        media
+      }
+
+      rememberQuotedMessage(msgId, msg)
+
+      // Persist + memory
+      addMessageRecord(rec)
+      upsertRecentMessage(rec)
+
+      // Forward to n8n (if enabled + allowed by rules)
+      if (isLiveNotify) {
+        try {
+          const textForRules = (type === 'text' ? text : (textRaw ? String(textRaw).trim() : ''))
+          if (shouldForwardToN8n(rec, textForRules)) {
+            enqueueN8nEvent(buildN8nEvent(rec, textForRules))
+          }
+        } catch (e) {
+          console.warn('⚠️ n8n forward (skipped):', e?.message)
+        }
+      }
+
+      // response rules (preferred)
+      let handledByRule = false
+      if (isLiveNotify) {
+        try {
+          const matchedRule = findMatchingResponseRule({
+            chatJid,
+            senderJid,
+            isGroup: group,
+            text,
+            rawText: textRaw,
+            type,
+            voiceNote: hasVoiceNote,
+            audio: hasAudio
+          })
+
+          if (matchedRule) {
+            await queueAutoReplyMessage(chatJid, group, matchedRule.replyText, 'rule', msgId)
+            handledByRule = true
+          }
+        } catch (e) {
+          console.warn('⚠️ Response rule handling failed:', e?.message)
+        }
+      }
+
+      // auto reply logic (optional / legacy fallback)
+      const autoReplyCfg = getAutoReplyConfig()
+      if (!handledByRule && autoReplyCfg.enabled) {
+        if (autoReplyCfg.scope === 'dm' && group) continue
+        if (autoReplyCfg.scope === 'group' && !group) continue
+
+        let textToMatch = (type === 'text' ? text : (textRaw ? String(textRaw).trim() : ''))
+        if (group) {
+          const { ok, text } = stripPrefixByValue(textToMatch, autoReplyCfg.groupPrefix)
+          if (!ok) continue
+          textToMatch = text
+          if (!textToMatch) continue
+        }
+
+        if (!matchesAutoReply(textToMatch)) continue
+
+        const last = lastAutoReplyAt.get(chatJid) || 0
+        if (Date.now() - last < autoReplyCfg.cooldownMs) continue
+        lastAutoReplyAt.set(chatJid, Date.now())
+
+        await queueAutoReplyMessage(chatJid, group, autoReplyCfg.text, 'auto', msgId)
+      }
+    }
   })
 
   sock.ev.on('messages.update', async (updates = []) => {
@@ -4122,6 +5541,16 @@ if (!handledByRule && autoReplyCfg.enabled) {
         if (remoteJid) {
           const relinked = updateMessageChatJidById(id, remoteJid)
           if (relinked) upsertRecentMessage(relinked)
+        }
+
+        // Handle protocol-level revoke updates
+        const protocol = u?.update?.message?.protocolMessage
+        const protocolType = Number(protocol?.type)
+        const revokedTargetId = String(protocol?.key?.id || '').trim()
+        if (revokedTargetId && (protocolType === 0 || String(protocol?.type || '').toUpperCase() === 'REVOKE')) {
+          const deleted = updateMessageStatusByAnyId(revokedTargetId, { status: 'deleted' })
+          if (deleted) upsertRecentMessage(deleted)
+          continue
         }
 
         const st = Number(u?.update?.status)
@@ -4140,6 +5569,9 @@ if (!handledByRule && autoReplyCfg.enabled) {
       console.warn('⚠️ messages.update handling failed:', e?.message)
     }
   })
+  } finally {
+    startWhatsAppInProgress = false
+  }
 }
 
 function requireConnected(req, res, next) {
@@ -4304,9 +5736,15 @@ function upsertRecentMessage(rec) {
   if (idx === undefined) {
     recentMessages.push(normalized)
     recentIndexById.set(normalized.id, recentMessages.length - 1)
-    while (recentMessages.length > MESSAGES_MEMORY_LIMIT) {
-      recentMessages.shift()
-      recentIndexById.clear()
+    // Trim array to limit without full rebuild
+    if (recentMessages.length > MESSAGES_MEMORY_LIMIT) {
+      const toRemove = recentMessages.length - MESSAGES_MEMORY_LIMIT
+      const removed = recentMessages.splice(0, toRemove)
+      // Only remove the deleted IDs from index, don't rebuild everything
+      for (const r of removed) {
+        if (r?.id) recentIndexById.delete(r.id)
+      }
+      // Update indices for remaining messages (shift down by toRemove)
       for (let i = 0; i < recentMessages.length; i++) {
         if (recentMessages[i]?.id) recentIndexById.set(recentMessages[i].id, i)
       }
@@ -4328,6 +5766,59 @@ function upsertRecentMessage(rec) {
 
   const summary = chatIndex.get(key)
   broadcastAdminMessageUpdate(key, normalized, summary)
+}
+
+// Faster version for bulk hydration (no broadcasts)
+function upsertRecentMessageSilent(rec) {
+  const normalized = {
+    id: rec.id || makeId('msg'),
+    waMsgId: rec.waMsgId ? String(rec.waMsgId) : null,
+    ts: rec.ts || Date.now(),
+    chatJid: normalizeJid(rec.chatJid),
+    senderJid: rec.senderJid || '',
+    isGroup: Boolean(rec.isGroup),
+    direction: rec.direction || 'in',
+    status: rec.status ?? null,
+    type: rec.type || 'text',
+    text: rec.text || '',
+    media: rec.media || null,
+    quotedMessageId: rec.quotedMessageId || null,
+  }
+
+  if (!normalized.chatJid) return
+
+  const idx = recentIndexById.get(normalized.id)
+  if (idx === undefined) {
+    recentMessages.push(normalized)
+    recentIndexById.set(normalized.id, recentMessages.length - 1)
+    // Trim array to limit without full rebuild
+    if (recentMessages.length > MESSAGES_MEMORY_LIMIT) {
+      const toRemove = recentMessages.length - MESSAGES_MEMORY_LIMIT
+      const removed = recentMessages.splice(0, toRemove)
+      // Only remove the deleted IDs from index, don't rebuild everything
+      for (const r of removed) {
+        if (r?.id) recentIndexById.delete(r.id)
+      }
+      // Update indices for remaining messages (shift down by toRemove)
+      for (let i = 0; i < recentMessages.length; i++) {
+        if (recentMessages[i]?.id) recentIndexById.set(recentMessages[i].id, i)
+      }
+    }
+  } else {
+    recentMessages[idx] = { ...recentMessages[idx], ...normalized }
+  }
+
+  const key = normalized.chatJid
+  const prev = chatIndex.get(key) || { chatJid: key, isGroup: normalized.isGroup, count: 0, lastTs: 0, lastText: '', lastSenderJid: '' }
+  chatIndex.set(key, {
+    ...prev,
+    isGroup: normalized.isGroup,
+    count: (prev.count || 0) + 1,
+    lastTs: Math.max(prev.lastTs || 0, normalized.ts || 0),
+    lastText: normalized.text || prev.lastText || '',
+    lastSenderJid: normalized.senderJid || prev.lastSenderJid || ''
+  })
+  // Skip broadcastAdminMessageUpdate for silent hydration
 }
 
 function splitTargetsInput(input) {
@@ -4458,6 +5949,16 @@ app.use(helmet({ contentSecurityPolicy: false }))
 app.use(express.json({ limit: '25mb' }))
 app.use(express.urlencoded({ extended: false }))
 
+const requestTracingMiddleware = createRequestTracingMiddleware({
+  headerName: 'x-request-id',
+  slowMs: Math.max(100, Number(process.env.HTTP_SLOW_MS || 800)),
+  includePaths: ['/admin', '/pairing'],
+  onEvent: (level, event, message, data) => {
+    logDiag(level, event, message, data)
+  }
+})
+app.use(requestTracingMiddleware)
+
 let limiter = null
 function rebuildRateLimiter() {
   const cfg = getRateLimitConfig()
@@ -4478,77 +5979,17 @@ app.use((req, res, next) => {
 })
 
 app.use(apiKeyMiddleware)
-
-app.use('/admin', (req, res, next) => {
-  const ip = clientIp(req)
-  if (!isIpAllowed(ip)) {
-    return res.status(403).json({ ok: false, error: 'Forbidden by admin IP allowlist' })
-  }
-  next()
-})
-
-app.use('/admin', (req, res, next) => {
-  if (!isAdminMutatingMethod(req)) return next()
-  if (String(req.path || '') === '/login') return next()
-
-  const ctx = resolveAdminAuthContext(req)
-  if (ctx.mode === 'api-key') return next()
-  if (!ctx.authorized) return res.status(401).json({ ok: false, error: 'Unauthorized' })
-
-  const cookies = parseCookies(req)
-  const cookieToken = String(cookies[ADMIN_CSRF_COOKIE] || '').trim()
-  const headerToken = String(req.headers['x-csrf-token'] || '').trim()
-  if (!cookieToken || !headerToken || cookieToken !== headerToken) {
-    return res.status(403).json({ ok: false, error: 'CSRF token invalid or missing' })
-  }
-  next()
-})
-
-app.use('/admin', (req, res, next) => {
-  if (String(req.path || '') === '/login') return next()
-
-  const ctx = resolveAdminAuthContext(req)
-  const acceptsHtml = String(req.headers.accept || '').includes('text/html')
-  if (!ctx.authorized) {
-    if (acceptsHtml) return res.redirect('/admin/login')
-    return res.status(401).json({ ok: false, error: 'Unauthorized' })
-  }
-
-  const requiredRole = requiredRoleForAdminRequest(req)
-  if (!roleSatisfies(ctx.role, requiredRole)) {
-    return res.status(403).json({ ok: false, error: `Forbidden: requires ${requiredRole} role`, requiredRole, currentRole: ctx.role })
-  }
-
-  req.adminRole = ctx.role
-  req.adminAuthMode = ctx.mode
-  next()
-})
-
-app.use('/admin', (req, res, next) => {
-  if (!isAdminMutatingMethod(req)) return next()
-
-  const startedAt = Date.now()
-  const ip = clientIp(req)
-  const ctx = resolveAdminAuthContext(req)
-  const authMode = ctx.mode || 'unknown'
-  const actor = ctx.authorized ? `${ctx.role}-${authMode}` : 'anonymous'
-
-  res.on('finish', () => {
-    appendAdminAuditLog({
-      action: 'admin_request',
-      method: req.method,
-      path: req.originalUrl || req.url,
-      statusCode: res.statusCode,
-      ok: res.statusCode >= 200 && res.statusCode < 400,
-      actor,
-      authMode,
-      ip,
-      userAgent: req.get('user-agent') || '',
-      durationMs: Date.now() - startedAt
-    })
-  })
-
-  next()
+registerAdminMiddlewares({
+  app,
+  clientIp,
+  isIpAllowed,
+  isAdminMutatingMethod,
+  resolveAdminAuthContext,
+  parseCookies,
+  adminCsrfCookieName: ADMIN_CSRF_COOKIE,
+  requiredRoleForAdminRequest,
+  roleSatisfies,
+  appendAdminAuditLog
 })
 
 app.get('/', (req, res) => {
@@ -4632,7 +6073,15 @@ app.get('/admin/me', adminKeyMiddleware, (req, res) => {
 app.use(
   '/admin/assets',
   requireAdminSessionAny,
-  express.static(path.join(process.cwd(), 'ui/admin'))
+  express.static(path.join(process.cwd(), 'ui/admin'), {
+    etag: true,
+    lastModified: false,
+    setHeaders(res) {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+      res.setHeader('Pragma', 'no-cache')
+      res.setHeader('Expires', '0')
+    }
+  })
 )
 
 
@@ -4646,7 +6095,9 @@ app.get('/health', async (req, res) => {
   const deadLetters = readN8nDeadLettersStore()
   const autoReply = getAutoReplyConfig()
   const rateCfg = getRateLimitConfig()
+  const apiCfg = getApiConfig()
   const mediaCfg = getMediaConfig()
+  const msgCfg = getMessageStorageConfig()
   res.json({
     ok: true,
     wa: { status: connectionStatus, hasQR: Boolean(lastQR) },
@@ -4655,11 +6106,22 @@ app.get('/health', async (req, res) => {
     queue: { name: WA_QUEUE_NAME, ...counts },
     autoReply: { enabled: autoReply.enabled, scope: autoReply.scope },
     rateLimit: { windowMs: rateCfg.windowMs, max: rateCfg.max },
-    media: { urlTtlSeconds: mediaCfg.urlTtlSeconds },
+    api: {
+      enabled: apiCfg.enabled,
+      sendTextEnabled: apiCfg.sendTextEnabled,
+      sendImageEnabled: apiCfg.sendImageEnabled,
+      sendDocumentEnabled: apiCfg.sendDocumentEnabled
+    },
+    media: { urlTtlSeconds: mediaCfg.urlTtlSeconds, retentionDays: mediaCfg.retentionDays },
     responseRules: { enabled: Boolean(responseRules?.enabled), count: Array.isArray(responseRules?.rules) ? responseRules.rules.length : 0 },
     schedules: { count: schedules.schedules.length, pending: schedules.schedules.filter(s => s.status === 'pending').length },
     n8n: { webhookUrls: getAutomationWebhookUrls().length, deadLetters: deadLetters.items.length },
-    messages: { storeFile: MESSAGES_STORE_FILE, max: MESSAGES_MAX, memLimit: MESSAGES_MEMORY_LIMIT }
+    messages: {
+      storage: activeStorageBackend(),
+      persistMax: msgCfg.persistMax,
+      uiFetchLimit: msgCfg.uiFetchLimit,
+      memLimit: MESSAGES_MEMORY_LIMIT
+    }
   })
 })
 
@@ -4667,36 +6129,63 @@ app.get('/health', async (req, res) => {
 /**
  * Pairing
  */
-app.get('/pairing/qr.png', requireAdminSessionAny, async (req, res) => {
+async function servePairingQrPng(req, res) {
   try {
     if (!lastQR) return res.status(404).send('No QR available')
     res.setHeader('Content-Type', 'image/png')
-    const pngBuffer = await QRCode.toBuffer(lastQR, { type: 'png', width: 320 })
-    res.send(pngBuffer)
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+    res.setHeader('Pragma', 'no-cache')
+    res.setHeader('Expires', '0')
+    res.setHeader('ETag', `"qr-${lastQRUpdatedAt}"`)
+
+    if (!lastQRPngBuffer || lastQRPngBufferVersion !== lastQRUpdatedAt) {
+      if (!qrPngBuildPromise) {
+        qrPngBuildPromise = QRCode.toBuffer(lastQR, { type: 'png', width: 320 })
+          .then((buf) => {
+            lastQRPngBuffer = buf
+            lastQRPngBufferVersion = lastQRUpdatedAt
+            return buf
+          })
+          .finally(() => {
+            qrPngBuildPromise = null
+          })
+      }
+      await qrPngBuildPromise
+    }
+
+    res.send(lastQRPngBuffer)
   } catch (err) {
     res.status(500).send(err?.message || 'Failed to generate QR PNG')
   }
-})
+}
 
-app.get('/pairing/stream', requireAdminSessionAny, (req, res) => {
+app.get('/pairing/qr.png', requireAdminSessionAny, servePairingQrPng)
+app.get('/admin/pairing/qr.png', adminKeyMiddleware, servePairingQrPng)
+
+function servePairingStream(req, res) {
   res.setHeader('Content-Type', 'text/event-stream')
-  res.setHeader('Cache-Control', 'no-cache, no-transform')
+  res.setHeader('Cache-Control', 'no-store, no-cache, no-transform, must-revalidate, max-age=0')
   res.setHeader('Connection', 'keep-alive')
+  res.setHeader('X-Accel-Buffering', 'no')
   res.flushHeaders?.()
+  try { res.write(': connected\n\n') } catch {}
 
   sseClients.add(res)
-  sseSend(res, 'status', { status: connectionStatus, hasQR: Boolean(lastQR) })
-  if (lastQR) sseSend(res, 'qr', { qr: lastQR })
+  sseSend(res, 'status', { status: connectionStatus, hasQR: Boolean(lastQR), qrUpdatedAt: lastQRUpdatedAt })
+  if (lastQR) sseSend(res, 'qr', { qr: lastQR, qrUpdatedAt: lastQRUpdatedAt })
 
   const ping = setInterval(() => {
     try { res.write(`event: ping\ndata: {}\n\n`) } catch {}
   }, 15000)
 
   req.on('close', () => {
-    clearTimeout(ping)
+    clearInterval(ping)
     sseClients.delete(res)
   })
-})
+}
+
+app.get('/pairing/stream', requireAdminSessionAny, servePairingStream)
+app.get('/admin/pairing/stream', adminKeyMiddleware, servePairingStream)
 
 /**
  * Pairing UI (kept as you provided)
@@ -4709,7 +6198,7 @@ app.get('/pairing/ui', (req, res) => {
  * Unified public send endpoints
  * - UPDATED: store outbound in persistent store + memory with status queued/sent/failed
  */
-app.post('/send', requireConnected, async (req, res) => {
+app.post('/send', requireApiToggle('sendTextEnabled', 'Text API'), requireConnected, async (req, res) => {
   const idem = beginIdempotentRequest(readIdempotencyKey(req))
   if (idem.duplicate) {
     if (idem.pending) {
@@ -4775,7 +6264,7 @@ app.post('/send', requireConnected, async (req, res) => {
   }
 })
 
-app.post('/send/image', requireConnected, upload.single('image'), async (req, res) => {
+app.post('/send/image', requireApiToggle('sendImageEnabled', 'Image API'), requireConnected, upload.single('image'), async (req, res) => {
   const idem = beginIdempotentRequest(readIdempotencyKey(req))
   if (idem.duplicate) {
     if (idem.pending) {
@@ -4881,7 +6370,7 @@ app.post('/send/image', requireConnected, upload.single('image'), async (req, re
   }
 })
 
-app.post('/send/document', requireConnected, upload.single('document'), async (req, res) => {
+app.post('/send/document', requireApiToggle('sendDocumentEnabled', 'Document API'), requireConnected, upload.single('document'), async (req, res) => {
   const idem = beginIdempotentRequest(readIdempotencyKey(req))
   if (idem.duplicate) {
     if (idem.pending) {
@@ -5070,8 +6559,8 @@ app.get('/board/link-preview', async (req, res) => {
 
 
 
-app.get('/admin/targets', adminKeyMiddleware, requireConnected, async (req, res) => {
-  const store = readContactsStore()
+app.get('/admin/targets', adminKeyMiddleware, async (req, res) => {
+  const store = contactsStoreCache || { contacts: [], groups: [], updatedAt: Date.now() }
   const contacts = (store.contacts || []).map(c => ({
     type: 'contact',
     name: c.name,
@@ -5088,6 +6577,19 @@ app.get('/admin/targets', adminKeyMiddleware, requireConnected, async (req, res)
     to: g.jid,
     jid: g.jid
   }))
+
+  if (connectionStatus !== 'open' || !sock) {
+    return res.json({
+      ok: true,
+      contacts,
+      groupAliases,
+      waGroups: [],
+      waContacts: [],
+      groupCacheUpdatedAt: groupCache.updatedAt,
+      contactCacheUpdatedAt: contactCache.updatedAt,
+      degraded: true
+    })
+  }
 
   const waGroups = Array.from(groupCache.byJid.values()).map(g => ({
     type: 'wa-group',
@@ -5118,10 +6620,11 @@ app.get('/admin/targets', adminKeyMiddleware, requireConnected, async (req, res)
 
 
 // ---- Automations (n8n) config ----
-app.get('/admin/settings/runtime', adminKeyMiddleware, (req, res) => {
-  const cfg = readRuntimeSettingsStore()
+app.get('/admin/settings/runtime', adminKeyMiddleware, async (req, res) => {
+  let cfg = await readRuntimeSettingsFromDb()
+  if (!cfg) cfg = readRuntimeSettingsStore()
   runtimeSettings = cfg
-  res.json({ ok: true, settings: cfg })
+  res.json({ ok: true, settings: cfg, storage: activeStorageBackend() })
 })
 
 app.get('/admin/audit', adminKeyMiddleware, (req, res) => {
@@ -5131,7 +6634,7 @@ app.get('/admin/audit', adminKeyMiddleware, (req, res) => {
   res.json({ ok: true, count: items.length, items, updatedAt: store.updatedAt })
 })
 
-app.post('/admin/settings/runtime', adminKeyMiddleware, (req, res) => {
+app.post('/admin/settings/runtime', adminKeyMiddleware, async (req, res) => {
   try {
     const patch = normalizeRuntimeSettingsPatch(req.body || {})
     runtimeSettings = {
@@ -5492,14 +6995,98 @@ app.delete('/admin/rules/:id', adminKeyMiddleware, (req, res) => {
 
 app.post('/admin/force-relink', adminKeyMiddleware, async (req, res) => {
   try {
-    const result = await triggerRelink('admin-force-relink')
+    const result = await triggerRelink('admin-force-relink', { clearAuth: true })
     if (result?.skipped) {
       return res.status(409).json({ ok: false, error: 'Relink already in progress' })
     }
+    logDiag('warn', 'wa.relink.forced', '🛠️ Force re-pair triggered from admin UI', { adminAuthMode: req.adminAuthMode || 'unknown' })
     res.json({ ok: true, status: connectionStatus })
   } catch (e) {
     res.status(500).json({ ok: false, error: e?.message || 'Failed to force relink' })
   }
+})
+
+function buildAdminDebugState() {
+  const mem = process.memoryUsage()
+  return {
+    ok: true,
+    now: Date.now(),
+    uptimeSec: Math.round(process.uptime()),
+    connection: {
+      status: connectionStatus,
+      relinkInProgress,
+      startWhatsAppInProgress,
+      reconnectAttemptCount,
+      hasQr: Boolean(lastQR),
+      lastQRUpdatedAt,
+      activeSocketToken
+    },
+    caches: {
+      recentMessages: recentMessages.length,
+      chatIndex: chatIndex.size,
+      waContactCache: contactCache.byJid.size,
+      waGroupCache: groupCache.byJid.size,
+      quotedMessageCache: quotedMessageCache.size
+    },
+    diagnostics: diag.stats(),
+    memory: {
+      rss: mem.rss,
+      heapTotal: mem.heapTotal,
+      heapUsed: mem.heapUsed,
+      external: mem.external
+    }
+  }
+}
+
+function listAdminDebugEvents(limit) {
+  return diag.list(limit)
+}
+
+async function runAdminDebugChecks() {
+  const startedAt = Date.now()
+  const checks = {
+    app: { ok: true, uptimeSec: Math.round(process.uptime()) },
+    wa: {
+      ok: connectionStatus === 'open' && Boolean(sock),
+      status: connectionStatus,
+      hasSocket: Boolean(sock)
+    },
+    storage: {
+      backend: pgPool ? 'postgres' : (sqliteDb ? 'sqlite' : 'json'),
+      ok: true,
+      details: {}
+    }
+  }
+
+  if (pgPool) {
+    try {
+      const r = await pgPool.query('SELECT COUNT(*)::int AS n FROM messages')
+      checks.storage.details.messagesCount = Number(r.rows?.[0]?.n || 0)
+    } catch (e) {
+      checks.storage.ok = false
+      checks.storage.details.error = e?.message || 'postgres check failed'
+    }
+  } else if (sqliteDb) {
+    try {
+      const row = sqliteDb.prepare('SELECT COUNT(*) AS n FROM messages').get()
+      checks.storage.details.messagesCount = Number(row?.n || 0)
+    } catch (e) {
+      checks.storage.ok = false
+      checks.storage.details.error = e?.message || 'sqlite check failed'
+    }
+  }
+
+  const elapsedMs = Date.now() - startedAt
+  const ok = checks.app.ok && checks.storage.ok
+  return { ok, elapsedMs, checks }
+}
+
+registerAdminDebugRoutes({
+  app,
+  adminKeyMiddleware,
+  buildDebugState: buildAdminDebugState,
+  listDebugEvents: listAdminDebugEvents,
+  runDebugChecks: runAdminDebugChecks
 })
 
 app.get('/admin/wa-groups', adminKeyMiddleware, requireConnected, async (req, res) => {
@@ -5751,7 +7338,7 @@ app.delete('/admin/groups/:name', adminKeyMiddleware, (req, res) => {
 /**
  * Chat threads list (in-memory summary)
  */
-app.get('/admin/messages/chats', adminKeyMiddleware, (req, res) => {
+app.get('/admin/messages/chats', adminKeyMiddleware, async (req, res) => {
   const store = readContactsStore()
   const byChatJid = new Map()
 
@@ -5781,6 +7368,26 @@ app.get('/admin/messages/chats', adminKeyMiddleware, (req, res) => {
       lastText: useIncomingAsLatest ? (summary?.lastText || '') : (prev.lastText || ''),
       lastSenderJid: useIncomingAsLatest ? (summary?.lastSenderJid || '') : (prev.lastSenderJid || '')
     })
+  }
+
+  if (pgPool || sqliteDb) {
+    const { rows, error } = await loadChatSummariesFromDb({ pgPool, sqliteDb, limit: 1000, normalizeJid })
+    if (error) {
+      console.warn(`⚠️ Failed to load chat summaries from ${pgPool ? 'PostgreSQL' : 'SQLite'}:`, error?.message)
+    } else {
+      for (const row of rows) {
+        const rawChatJid = normalizeJid(row?.chatJid)
+        const chatJid = rawChatJid && !isGroupJid(rawChatJid) ? resolvePreferredChatJid(rawChatJid) : rawChatJid
+        mergeSummary({
+          chatJid,
+          isGroup: Boolean(row?.isGroup),
+          count: Number(row?.count || 0),
+          lastTs: Number(row?.lastTs || 0),
+          lastText: String(row?.lastText || ''),
+          lastSenderJid: String(row?.lastSenderJid || '')
+        })
+      }
+    }
   }
 
   for (const c of Array.from(chatIndex.values())) {
@@ -5857,13 +7464,77 @@ app.get('/admin/messages/chats', adminKeyMiddleware, (req, res) => {
 /**
  * Messages in a chat (poll this) — now includes outbound too
  */
-app.get('/admin/messages/chat/:jid', adminKeyMiddleware, (req, res) => {
+app.get('/admin/messages/chat/:jid', adminKeyMiddleware, async (req, res) => {
   const chatJid = normalizeJid(req.params.jid);
-  const limit = Math.min(Number(req.query.limit || 200), 1000);
+  const msgCfg = getMessageStorageConfig()
+  const defaultLimit = Number(msgCfg.uiFetchLimit || 500)
+  const limit = Math.min(Math.max(Number(req.query.limit || defaultLimit), 1), 2000);
   const since = Number(req.query.since || 0);
 
   const aliases = resolveEquivalentChatJids(chatJid);
   const matchJids = aliases.size ? aliases : new Set([chatJid]);
+
+  if (pgPool && matchJids.size) {
+    try {
+      const jidList = Array.from(matchJids)
+      const params = [jidList, limit]
+      let where = 'chat_jid = ANY($1::text[])'
+      if (since > 0) {
+        where += ' AND GREATEST(ts, COALESCE(status_ts, 0)) > $3'
+        params.push(since)
+      }
+
+      const q = `
+        SELECT id, wa_msg_id, ts, direction, chat_jid, sender_jid, is_group, type, text_content, media, status, status_ts, quoted_message_id
+        FROM messages
+        WHERE ${where}
+        ORDER BY ts DESC
+        LIMIT $2
+      `
+      const out = await pgPool.query(q, params)
+      let msgs = (out.rows || []).map(rowToMessage).filter(Boolean).reverse()
+      msgs = msgs.map(refreshMediaForClient)
+      const latest = msgs.length
+        ? Math.max(msgs[msgs.length - 1].ts || 0, msgs[msgs.length - 1].statusTs || 0)
+        : since
+
+      return res.json({ ok: true, chatJid, count: msgs.length, latestTs: latest, messages: msgs })
+    } catch (e) {
+      console.warn('⚠️ Failed to fetch chat messages from PostgreSQL:', e?.message)
+    }
+  }
+
+  if (sqliteDb && matchJids.size) {
+    try {
+      const jidList = Array.from(matchJids)
+      const jidPlaceholders = jidList.map(() => '?').join(', ')
+      const whereParts = [`chat_jid IN (${jidPlaceholders})`]
+      const params = [...jidList]
+      if (since > 0) {
+        whereParts.push('MAX(ts, COALESCE(status_ts, 0)) > ?')
+        params.push(since)
+      }
+      params.push(limit)
+
+      const q = `
+        SELECT id, wa_msg_id, ts, direction, chat_jid, sender_jid, is_group, type, text_content, media, status, status_ts, quoted_message_id
+        FROM messages
+        WHERE ${whereParts.join(' AND ')}
+        ORDER BY ts DESC
+        LIMIT ?
+      `
+      const outRows = sqliteDb.prepare(q).all(...params)
+      let msgs = (outRows || []).map(rowToMessage).filter(Boolean).reverse()
+      msgs = msgs.map(refreshMediaForClient)
+      const latest = msgs.length
+        ? Math.max(msgs[msgs.length - 1].ts || 0, msgs[msgs.length - 1].statusTs || 0)
+        : since
+
+      return res.json({ ok: true, chatJid, count: msgs.length, latestTs: latest, messages: msgs })
+    } catch (e) {
+      console.warn('⚠️ Failed to fetch chat messages from SQLite:', e?.message)
+    }
+  }
 
   let msgs = recentMessages.filter(m => matchJids.has(normalizeJid(m.chatJid)));
 
@@ -5913,13 +7584,89 @@ app.get('/admin/messages/stream', requireAdminSessionAny, (req, res) => {
   })
 })
 
-app.get('/admin/messages/search', adminKeyMiddleware, (req, res) => {
+app.get('/admin/messages/search', adminKeyMiddleware, async (req, res) => {
   const q = String(req.query.q || '').trim().toLowerCase()
   const chatJid = String(req.query.chatJid || '').trim()
   const direction = String(req.query.direction || '').trim()
   const type = String(req.query.type || '').trim()
   const offset = Math.max(0, Number(req.query.offset || 0))
   const limit = Math.min(Math.max(Number(req.query.limit || 100), 1), 1000)
+
+  if (pgPool) {
+    try {
+      const clauses = []
+      const values = []
+      let i = 1
+
+      if (chatJid) { clauses.push(`chat_jid = $${i++}`); values.push(chatJid) }
+      if (direction) { clauses.push(`direction = $${i++}`); values.push(direction) }
+      if (type) { clauses.push(`type = $${i++}`); values.push(type) }
+      if (q) {
+        clauses.push(`(
+          LOWER(COALESCE(text_content,'')) LIKE $${i}
+          OR LOWER(COALESCE(sender_jid,'')) LIKE $${i}
+          OR LOWER(COALESCE(chat_jid,'')) LIKE $${i}
+        )`)
+        values.push(`%${q}%`)
+        i += 1
+      }
+
+      const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
+      const totalQ = `SELECT COUNT(*)::int AS n FROM messages ${where}`
+      const rowsQ = `
+        SELECT id, wa_msg_id, ts, direction, chat_jid, sender_jid, is_group, type, text_content, media, status, status_ts, quoted_message_id
+        FROM messages
+        ${where}
+        ORDER BY ts DESC
+        OFFSET $${i} LIMIT $${i + 1}
+      `
+      const totalOut = await pgPool.query(totalQ, values)
+      const rowsOut = await pgPool.query(rowsQ, [...values, offset, limit])
+      const total = Number(totalOut.rows?.[0]?.n || 0)
+      const items = (rowsOut.rows || []).map(rowToMessage).filter(Boolean)
+      return res.json({ ok: true, total, offset, limit, count: items.length, items })
+    } catch (e) {
+      console.warn('⚠️ Failed to search messages in PostgreSQL:', e?.message)
+    }
+  }
+
+  if (sqliteDb) {
+    try {
+      const clauses = []
+      const values = []
+
+      if (chatJid) { clauses.push('chat_jid = ?'); values.push(chatJid) }
+      if (direction) { clauses.push('direction = ?'); values.push(direction) }
+      if (type) { clauses.push('type = ?'); values.push(type) }
+      if (q) {
+        clauses.push(`(
+          LOWER(COALESCE(text_content,'')) LIKE ?
+          OR LOWER(COALESCE(sender_jid,'')) LIKE ?
+          OR LOWER(COALESCE(chat_jid,'')) LIKE ?
+        )`)
+        const like = `%${q}%`
+        values.push(like, like, like)
+      }
+
+      const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
+      const totalQ = `SELECT COUNT(*) AS n FROM messages ${where}`
+      const rowsQ = `
+        SELECT id, wa_msg_id, ts, direction, chat_jid, sender_jid, is_group, type, text_content, media, status, status_ts, quoted_message_id
+        FROM messages
+        ${where}
+        ORDER BY ts DESC
+        LIMIT ? OFFSET ?
+      `
+
+      const totalOut = sqliteDb.prepare(totalQ).get(...values)
+      const rowsOut = sqliteDb.prepare(rowsQ).all(...values, limit, offset)
+      const total = Number(totalOut?.n || 0)
+      const items = (rowsOut || []).map(rowToMessage).filter(Boolean)
+      return res.json({ ok: true, total, offset, limit, count: items.length, items })
+    } catch (e) {
+      console.warn('⚠️ Failed to search messages in SQLite:', e?.message)
+    }
+  }
 
   let rows = readMessagesStore().messages || []
   if (chatJid) rows = rows.filter(m => String(m.chatJid || '') === chatJid)
@@ -6354,6 +8101,9 @@ if (req.file?.path) {
 app.get('/admin/ui', (req, res) => {
   if (!hasValidAdminSession(req)) return res.redirect('/admin/login')
   res.setHeader('Content-Type', 'text/html; charset=utf-8')
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+  res.setHeader('Pragma', 'no-cache')
+  res.setHeader('Expires', '0')
   res.sendFile(path.join(UI_DIR, 'admin', 'admin-v2.html'))
 })
 
@@ -6368,11 +8118,11 @@ app.get('/admin/ui-legacy', (req, res) => {
  * Media cleanup
  * ----------------------------
  */
-const MEDIA_TTL_DAYS = Number(process.env.MEDIA_TTL_DAYS || 2);
 const MEDIA_CLEANUP_EVERY_HOURS = Number(process.env.MEDIA_CLEANUP_EVERY_HOURS || 12);
 
 function cleanupOldUploads() {
-  const cutoff = Date.now() - MEDIA_TTL_DAYS * 24 * 60 * 60 * 1000;
+  const retentionDays = Math.max(1, Number(getMediaConfig().retentionDays || 7))
+  const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
 
   try {
     const files = fs.readdirSync(UPLOAD_DIR);
@@ -6389,7 +8139,7 @@ function cleanupOldUploads() {
       }
     }
 
-    if (removed) console.log(`🧹 Media cleanup: removed ${removed} old file(s)`);
+    if (removed) console.log(`🧹 Media cleanup: removed ${removed} old file(s) (retention ${retentionDays} day(s))`);
   } catch (e) {
     console.warn('⚠️ Media cleanup failed:', e?.message);
   }
@@ -6409,12 +8159,92 @@ async function shutdown() {
   try { await queueEvents?.close() } catch {}
   try { await queueEventsConn?.quit() } catch {}
   try { await redis?.quit() } catch {}
+  try { await pgPool?.end?.() } catch {}
+  try { sqliteDb?.close?.() } catch {}
   process.exit(0)
 }
 
 process.on('SIGINT', shutdown)
 process.on('SIGTERM', shutdown)
 
+// ----------------------------
+// Hydrate all KV stores from DB at startup (DB is authoritative)
+// ----------------------------
+async function hydrateStoresFromDb() {
+  const ensureKv = async (key, defaultFn) => {
+    const existing = await readKvFromDb(key, null)
+    if (existing !== null) return existing
+    const seeded = defaultFn ? defaultFn() : null
+    if (seeded !== null) await writeKvToDb(key, seeded).catch(() => {})
+    return seeded
+  }
+
+  // --- Contacts ---
+  const contactsData = await ensureKv('contacts', () => ({ contacts: [], groups: [], updatedAt: Date.now() }))
+  if (contactsData) {
+    contactsStoreCache = {
+      contacts: Array.isArray(contactsData?.contacts) ? contactsData.contacts : [],
+      groups: Array.isArray(contactsData?.groups) ? contactsData.groups : [],
+      updatedAt: Number(contactsData?.updatedAt || Date.now())
+    }
+    contactsStoreNeedsNormalize = true
+  }
+
+  // --- Automations ---
+  const automationsData = await ensureKv('automations', defaultAutomationsConfig)
+  if (automationsData) {
+    automations = mergeDeep(defaultAutomationsConfig(), automationsData)
+  }
+
+  // --- Rules ---
+  const rulesData = await ensureKv('rules', defaultRulesConfig)
+  if (rulesData) {
+    responseRules = rulesData
+  }
+
+  // --- Templates ---
+  const templatesData = await ensureKv('templates', defaultTemplatesConfig)
+  if (templatesData) {
+    templatesStoreCache = mergeDeep(defaultTemplatesConfig(), templatesData)
+  }
+
+  // --- Schedules ---
+  const schedulesData = await ensureKv('schedules', defaultSchedulesConfig)
+  if (schedulesData) {
+    schedulesStoreCache = {
+      ...defaultSchedulesConfig(),
+      ...(schedulesData || {}),
+      jobs: Array.isArray(schedulesData?.jobs) ? schedulesData.jobs : []
+    }
+  }
+
+  // --- N8n Dead Letters ---
+  const deadLettersData = await ensureKv('n8n_dead_letters', defaultN8nDeadLettersConfig)
+  if (deadLettersData) {
+    deadLettersStoreCache = {
+      ...defaultN8nDeadLettersConfig(),
+      ...(deadLettersData || {}),
+      items: Array.isArray(deadLettersData?.items) ? deadLettersData.items : []
+    }
+  }
+
+  // --- Boards ---
+  const boardsData = await ensureKv('boards', () => [])
+  if (boardsData) {
+    boards = Array.isArray(boardsData) ? boardsData : []
+  }
+
+  // --- Admin Audit ---
+  const auditData = await ensureKv('admin_audit', () => ({ items: [], updatedAt: Date.now() }))
+  if (auditData) {
+    adminAuditStoreCache = {
+      items: Array.isArray(auditData?.items) ? auditData.items : [],
+      updatedAt: Number(auditData?.updatedAt || Date.now())
+    }
+  }
+
+  console.log('📦 All KV stores hydrated from DB')
+}
 
 /**
  * ----------------------------
@@ -6426,19 +8256,21 @@ app.listen(PORT, async () => {
   if (!REQUIRE_API_KEY) console.log('⚠️ WARNING: WA_API_KEY not set. Set it in .env before VPS.')
   if (!REQUIRE_ADMIN_KEY) console.log('⚠️ WARNING: Admin keys not set (WA_ADMIN_KEY / WA_OPERATOR_KEY / WA_VIEWER_KEY). Admin UI/API will not work.')
 
-  ensureContactsStore()
-  ensureMessagesStore()
-  ensureRulesStore()
-  ensureRuntimeSettingsStore()
-  ensureSchedulesStore()
-  ensureN8nDeadLettersStore()
-  runtimeSettings = readRuntimeSettingsStore()
+  await initDatabaseStorage()
+  runtimeSettings = (await readRuntimeSettingsFromDb()) || readRuntimeSettingsStore()
   rebuildRateLimiter()
+  await hydrateStoresFromDb()
   responseRules = readRulesStore()
-  hydrateInMemoryFromStore()
+  await hydrateInMemoryFromStore()
   loadBoards()
 
   processDueSchedules().catch(() => {})
+
+  const autoClearAuthOnBoot = String(process.env.WA_AUTO_CLEAR_AUTH_ON_BOOT || '0').trim() === '1'
+  if (autoClearAuthOnBoot) {
+    await clearAuthStorage().catch(() => {})
+    console.log('🧹 Auto-cleared auth on boot (WA_AUTO_CLEAR_AUTH_ON_BOOT=1)')
+  }
 
   await startWhatsApp()
 })
