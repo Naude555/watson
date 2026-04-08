@@ -4,7 +4,6 @@ services:
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis_data:/data
-    exclude_from_hc: true
     restart: unless-stopped
 
   wa-api:
@@ -19,7 +18,6 @@ services:
     volumes:
       - ./uploads:/app/uploads
       - ./data:/data
-      - ./ui:/app/ui
     healthcheck:
       test: ["CMD-SHELL", "wget --spider --header=\"x-api-key: ${WA_API_KEY}\" http://localhost:3000/health || exit 1"]
       interval: 10s
