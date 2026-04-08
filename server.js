@@ -981,6 +981,15 @@ async function writeAuthCredsToDb(creds) {
   return await writeKvToDb(AUTH_CREDS_DB_KEY, creds)
 }
 
+function reviveBufferJson(value, fallback = null) {
+  if (value == null) return fallback
+  try {
+    return JSON.parse(JSON.stringify(value), BufferJSON.reviver)
+  } catch {
+    return fallback
+  }
+}
+
 async function readAuthKeysFromDb(type, ids = []) {
   const out = {}
   const keyType = String(type || '').trim()
@@ -996,7 +1005,7 @@ async function readAuthKeysFromDb(type, ids = []) {
       for (const row of (r.rows || [])) {
         if (!row?.key_id) continue
         const val = row.value && typeof row.value === 'object'
-          ? row.value
+          ? reviveBufferJson(row.value, null)
           : (() => { try { return JSON.parse(String(row.value || '{}'), BufferJSON.reviver) } catch { return null } })()
         if (val !== null) out[String(row.key_id)] = val
       }
@@ -1016,7 +1025,7 @@ async function readAuthKeysFromDb(type, ids = []) {
         const keyId = String(row?.key_id || '')
         if (!keyId) continue
         try {
-          out[keyId] = JSON.parse(String(row.value || '{}'))
+          out[keyId] = JSON.parse(String(row.value || '{}'), BufferJSON.reviver)
         } catch {}
       }
     } catch (e) {
@@ -1114,8 +1123,8 @@ async function preloadAuthKeysToCache() {
         const id = String(row?.key_id || '')
         if (!type || !id) continue
         const val = row.value && typeof row.value === 'object'
-          ? row.value
-          : (() => { try { return JSON.parse(String(row.value || '{}')) } catch { return null } })()
+          ? reviveBufferJson(row.value, null)
+          : (() => { try { return JSON.parse(String(row.value || '{}'), BufferJSON.reviver) } catch { return null } })()
         if (val !== null) {
           if (!waAuthKeysCache[type]) waAuthKeysCache[type] = {}
           waAuthKeysCache[type][id] = val

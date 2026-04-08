@@ -1454,12 +1454,25 @@
                 <option value="">— Select group —</option>
               </select>
 
-              <div class="label" style="margin-top:8px">Participants (name/phone/jid; comma or newline)</div>
-              <textarea id="groupParticipants" placeholder="082..., name, or jid" style="height: 70px;"></textarea>
+              <div class="label" style="margin-top:8px">Participants</div>
+              <div class="recipient-picker" id="groupParticipantPicker">
+                <div class="recipient-chips" id="groupParticipantChips"></div>
+                <div class="recipient-search-wrap">
+                  <input id="groupParticipantSearch" placeholder="Search contacts or groups…" autocomplete="off"
+                    oninput="syncGroupParticipantPicker(this.value)"
+                    onfocus="syncGroupParticipantPicker(this.value)"
+                    onkeydown="handleGroupPickerKey(event)" />
+                  <select id="groupParticipantPickList" multiple size="6" ondblclick="addSelectedGroupParticipants()" style="margin-top:8px;"></select>
+                </div>
+              </div>
+              <div class="row" style="margin-top:8px;">
+                <button class="btn-ghost" type="button" onclick="addSelectedGroupParticipants()">Add Selected</button>
+                <button class="btn-ghost" type="button" onclick="addAllFilteredGroupParticipants()">Add All Filtered</button>
+              </div>
 
-              <div class="row wrap">
-                <button class="btn-ghost" type="button" onclick="groupAction('add')">Add</button>
-                <button class="btn-ghost" type="button" onclick="groupAction('remove')">Remove</button>
+              <div class="row wrap" style="margin-top:12px;">
+                <button class="btn-ghost" type="button" onclick="groupAction('add')">Add to Group</button>
+                <button class="btn-ghost" type="button" onclick="groupAction('remove')">Remove from Group</button>
                 <button class="btn-ghost" type="button" onclick="groupAction('promote')">Promote</button>
                 <button class="btn-ghost" type="button" onclick="groupAction('demote')">Demote</button>
               </div>

@@ -2530,13 +2530,132 @@ async function createGroup() {
   }
 }
 
+let groupParticipantSenders = [];
+
 function selectGroupForOps() {
   selectedGroupJid = String(document.getElementById('groupSelect')?.value || '').trim();
+  groupParticipantSenders = [];
+  renderGroupParticipantChips();
+  document.getElementById('groupParticipantSearch').value = '';
+  syncGroupParticipantPicker('');
+}
+
+function setGroupParticipantManualValues(values = []) {
+  groupParticipantSenders = (Array.isArray(values) ? values : []).map(v => String(v || '').trim()).filter(Boolean);
+  renderGroupParticipantChips();
+}
+
+function getGroupParticipantManualValues() {
+  return groupParticipantSenders;
 }
 
 function readGroupParticipants() {
-  const raw = String(document.getElementById('groupParticipants')?.value || '').trim();
-  return raw.split(/[\n,;]+/).map(x => x.trim()).filter(Boolean);
+  return getGroupParticipantManualValues();
+}
+
+function renderGroupParticipantChips() {
+  const chips = document.getElementById('groupParticipantChips');
+  if (!chips) return;
+  chips.innerHTML = '';
+  for (const value of groupParticipantSenders) {
+    const label = contactLabelForValue(value);
+    const chip = document.createElement('div');
+    chip.className = 'recipient-chip';
+    chip.style.cssText = 'background: rgba(138, 43, 226, 0.2); border: 1px solid rgba(138, 43, 226, 0.5); border-radius: 16px; padding: 4px 10px; display: inline-flex; align-items: center; gap: 6px; margin: 2px; font-size: 12px; color: #ccc;';
+    chip.innerHTML = `
+      <span>${esc(label || value)}</span>
+      <button type="button" style="background: none; border: none; color: #aaa; cursor: pointer; padding: 0; font-size: 14px;" onclick="removeGroupParticipant('${esc(value)}')" title="Remove">×</button>
+    `;
+    chips.appendChild(chip);
+  }
+}
+
+function removeGroupParticipant(value) {
+  groupParticipantSenders = groupParticipantSenders.filter(v => String(v || '').trim() !== String(value || '').trim());
+  renderGroupParticipantChips();
+}
+
+function addGroupParticipant(label, value) {
+  const v = String(value || '').trim();
+  if (!v || groupParticipantSenders.some(x => String(x).trim() === v)) return;
+  groupParticipantSenders.push(v);
+  renderGroupParticipantChips();
+}
+
+function syncGroupParticipantPicker(q) {
+  const list = document.getElementById('groupParticipantPickList');
+  if (!list) return;
+
+  const query = String(q || '').trim().toLowerCase();
+  const selected = new Set(getGroupParticipantManualValues().map(v => v.toLowerCase()));
+
+  const rows = [...(contacts || [])]
+    .sort((a, b) => String(a?.name || '').localeCompare(String(b?.name || ''), undefined, { sensitivity: 'base' }))
+    .filter(c => {
+      const value = ruleDmFilterCandidateValue(c);
+      const summary = contactIdentifierSummary(c);
+      const hay = `${String(c?.name || '')} ${summary} ${value}`.toLowerCase();
+      return !query || hay.includes(query);
+    });
+
+  list.innerHTML = '';
+  for (const c of rows) {
+    const value = ruleDmFilterCandidateValue(c);
+    if (!value) continue;
+    const name = String(c?.name || '').trim() || value;
+    const summary = contactIdentifierSummary(c);
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = summary ? `${name} — ${summary}` : name;
+    if (selected.has(String(value).toLowerCase())) option.disabled = true;
+    list.appendChild(option);
+  }
+
+  if (!list.options.length) {
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = 'No matching contacts';
+    option.disabled = true;
+    list.appendChild(option);
+  }
+}
+
+function addSelectedGroupParticipants() {
+  const list = document.getElementById('groupParticipantPickList');
+  if (!list) return;
+  const picked = Array.from(list.selectedOptions || [])
+    .filter(o => !o.disabled)
+    .map(o => String(o.value || '').trim())
+    .filter(Boolean);
+  if (!picked.length) {
+    toast('Select participant(s) to add', false);
+    return;
+  }
+  for (const value of picked) {
+    addGroupParticipant(contactLabelForValue(value), value);
+  }
+}
+
+function addAllFilteredGroupParticipants() {
+  const list = document.getElementById('groupParticipantPickList');
+  if (!list) return;
+  const picked = Array.from(list.options || [])
+    .filter(o => !o.disabled)
+    .map(o => String(o.value || '').trim())
+    .filter(Boolean);
+  if (!picked.length) return;
+  for (const value of picked) {
+    addGroupParticipant(contactLabelForValue(value), value);
+  }
+}
+
+function handleGroupPickerKey(evt) {
+  const list = document.getElementById('groupParticipantPickList');
+  if (!list) return;
+  if (evt.key === 'Enter') {
+    evt.preventDefault();
+    addSelectedGroupParticipants();
+  }
 }
 
 async function groupAction(action) {
