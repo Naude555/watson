@@ -1,26 +1,25 @@
 services:
   redis:
-    image: 'redis:7-alpine'
-    command:
-      - redis-server
-      - '--appendonly'
-      - 'yes'
-    exclude_from_hc: true
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
     volumes:
-      - 'redis_data:/data'
+      - redis_data:/data
+    exclude_from_hc: true
     restart: unless-stopped
 
   wa-api:
     build: .
     container_name: wa-api
-    env_file:
-      - .env
+    env_file: .env
+    environment:
+      WA_AUTO_CLEAR_AUTH_ON_BOOT: "0"
+      WA_FORCE_LATEST_WEB_VERSION: "1"
     expose:
-      - '3000'
+      - "3000"
     volumes:
-      - './auth:/app/auth'
-      - './uploads:/app/uploads'
-      - './data:/data'
+      - ./uploads:/app/uploads
+      - ./data:/data
+      - ./ui:/app/ui
     healthcheck:
       test: ["CMD-SHELL", "wget --spider --header=\"x-api-key: ${WA_API_KEY}\" http://localhost:3000/health || exit 1"]
       interval: 10s
@@ -33,4 +32,3 @@ services:
 
 volumes:
   redis_data:
-    null
