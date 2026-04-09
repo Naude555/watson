@@ -874,6 +874,100 @@ function patchMessageInDbByWaMsgId(waMsgId, patch = {}) {
   if (sqliteDb) return patchMessageInSqliteByWaMsgId(waMsgId, patch)
 }
 
+function findMessageInMemoryByAnyId(idOrWaId) {
+  const key = String(idOrWaId || '').trim()
+  if (!key) return null
+
+  const storeMessages = Array.isArray(messagesStoreCache?.messages) ? messagesStoreCache.messages : []
+  for (let i = storeMessages.length - 1; i >= 0; i--) {
+    const m = storeMessages[i]
+    if (!m) continue
+    if (String(m.id || '') === key || String(m.waMsgId || '') === key) {
+      return {
+        id: String(m.id || ''),
+        waMsgId: m.waMsgId ? String(m.waMsgId) : null,
+        ts: Number(m.ts || 0),
+        direction: String(m.direction || 'in'),
+        chatJid: normalizeJid(m.chatJid || ''),
+        senderJid: String(m.senderJid || ''),
+        isGroup: Boolean(m.isGroup),
+        type: String(m.type || 'text'),
+        text: String(m.text || ''),
+        media: m.media || null,
+        status: m.status ? String(m.status) : null,
+        statusTs: m.statusTs ? Number(m.statusTs) : null,
+        quotedMessageId: m.quotedMessageId ? String(m.quotedMessageId) : null
+      }
+    }
+  }
+
+  for (let i = recentMessages.length - 1; i >= 0; i--) {
+    const m = recentMessages[i]
+    if (!m) continue
+    if (String(m.id || '') === key || String(m.waMsgId || '') === key) {
+      return {
+        id: String(m.id || ''),
+        waMsgId: m.waMsgId ? String(m.waMsgId) : null,
+        ts: Number(m.ts || 0),
+        direction: String(m.direction || 'in'),
+        chatJid: normalizeJid(m.chatJid || ''),
+        senderJid: String(m.senderJid || ''),
+        isGroup: Boolean(m.isGroup),
+        type: String(m.type || 'text'),
+        text: String(m.text || ''),
+        media: m.media || null,
+        status: m.status ? String(m.status) : null,
+        statusTs: m.statusTs ? Number(m.statusTs) : null,
+        quotedMessageId: m.quotedMessageId ? String(m.quotedMessageId) : null
+      }
+    }
+  }
+
+  return null
+}
+
+async function findMessageInDbByAnyId(idOrWaId) {
+  const key = String(idOrWaId || '').trim()
+  if (!key) return null
+
+  if (pgPool) {
+    try {
+      const out = await pgPool.query(
+        `SELECT id, wa_msg_id, ts, direction, chat_jid, sender_jid, is_group, type, text_content, media, status, status_ts, quoted_message_id
+         FROM messages
+         WHERE id = $1 OR wa_msg_id = $1
+         ORDER BY ts DESC
+         LIMIT 1`,
+        [key]
+      )
+      return rowToMessage(out.rows?.[0])
+    } catch (e) {
+      console.warn('⚠️ Failed to lookup message in PostgreSQL:', e?.message)
+    }
+  }
+
+  if (sqliteDb) {
+    try {
+      const row = sqliteDb.prepare(
+        `SELECT id, wa_msg_id, ts, direction, chat_jid, sender_jid, is_group, type, text_content, media, status, status_ts, quoted_message_id
+         FROM messages
+         WHERE id = ? OR wa_msg_id = ?
+         ORDER BY ts DESC
+         LIMIT 1`
+      ).get(key, key)
+      return rowToMessage(row)
+    } catch (e) {
+      console.warn('⚠️ Failed to lookup message in SQLite:', e?.message)
+    }
+  }
+
+  return null
+}
+
+async function findMessageByAnyId(idOrWaId) {
+  return findMessageInMemoryByAnyId(idOrWaId) || await findMessageInDbByAnyId(idOrWaId)
+}
+
 // ----------------------------
 // Generic KV store helpers (contacts, templates, rules, automations, etc.)
 // ----------------------------
@@ -3255,8 +3349,14 @@ function resolvePreferredChatJid(inputJidRaw) {
   const jid = normalizeJid(inputJidRaw)
   if (!jid || isGroupJid(jid)) return jid
 
+  // Prefer phone JID when a LID can be mapped via contact identity cache.
+  if (jid.endsWith('@lid')) {
+    const lidResolved = resolveLidToUserJid(jid)
+    if (lidResolved) return lidResolved
+  }
+
   const store = readContactsStore()
-  const found = findContactByAnyDirectId(store, jid)
+  const found = findContactByAnyDirectId(store, jid, msisdnFromJid(jid))
   if (!found) return jid
   return resolveCanonicalChatJidFromContact(found) || jid
 }
@@ -3266,11 +3366,18 @@ function resolveEquivalentChatJids(chatJidRaw) {
   if (!chatJid) return new Set()
   if (isGroupJid(chatJid)) return new Set([chatJid])
 
-  const store = readContactsStore()
-  const found = findContactByAnyDirectId(store, chatJid)
-  if (!found) return new Set([chatJid])
-
   const out = new Set([chatJid])
+
+  // Add direct LID ↔ phone equivalent when available, even without a full contact entry.
+  if (chatJid.endsWith('@lid')) {
+    const lidResolved = resolveLidToUserJid(chatJid)
+    if (lidResolved) out.add(lidResolved)
+  }
+
+  const store = readContactsStore()
+  const found = findContactByAnyDirectId(store, chatJid, msisdnFromJid(chatJid))
+  if (!found) return out
+
   const canonical = resolveCanonicalChatJidFromContact(found)
   if (canonical) out.add(canonical)
   const preferred = resolveDeliveryJidFromContact(found)
@@ -7560,6 +7667,65 @@ app.get('/admin/messages/chat/:jid', adminKeyMiddleware, async (req, res) => {
 
   res.json({ ok: true, chatJid, count: msgs.length, latestTs: latest, messages: msgs });
 });
+
+app.post('/admin/messages/:id/delete', adminKeyMiddleware, requireConnected, async (req, res) => {
+  try {
+    const rawId = String(req.params.id || '').trim()
+    if (!rawId) return res.status(400).json({ ok: false, error: 'Message id required' })
+
+    const deleteForAll = req.body?.deleteForAll !== false
+    const found = await findMessageByAnyId(rawId)
+    if (!found) return res.status(404).json({ ok: false, error: 'Message not found' })
+
+    const direction = String(found.direction || '').toLowerCase()
+    if (direction !== 'out') {
+      return res.status(400).json({ ok: false, error: 'Only outbound messages can be revoked' })
+    }
+
+    const chatJid = normalizeJid(found.chatJid || req.body?.chatJid || '')
+    if (!chatJid) return res.status(400).json({ ok: false, error: 'Missing chat JID for message' })
+
+    const waMsgId = String(found.waMsgId || '').trim()
+    const alreadyDeleted = String(found.status || '').toLowerCase() === 'deleted'
+
+    if (deleteForAll && !alreadyDeleted) {
+      if (!waMsgId) {
+        return res.status(409).json({ ok: false, error: 'Message is not yet linked to a WhatsApp id (still queued or failed)' })
+      }
+
+      const key = {
+        remoteJid: chatJid,
+        fromMe: true,
+        id: waMsgId
+      }
+      await sock.sendMessage(chatJid, { delete: key })
+    }
+
+    let updated = updateMessageStatus(rawId, { status: 'deleted' })
+    if (!updated && waMsgId) updated = updateMessageStatusByWaMsgId(waMsgId, { status: 'deleted' })
+
+    if (!updated) {
+      const patch = { status: 'deleted', statusTs: Date.now() }
+      if (found.id) patchMessageInDbById(found.id, patch)
+      else if (waMsgId) patchMessageInDbByWaMsgId(waMsgId, patch)
+      updated = { ...found, ...patch }
+    }
+
+    upsertRecentMessage(updated)
+
+    res.json({
+      ok: true,
+      id: updated.id || found.id || rawId,
+      waMsgId: updated.waMsgId || waMsgId || null,
+      chatJid,
+      status: updated.status || 'deleted',
+      deletedForAll: Boolean(deleteForAll),
+      alreadyDeleted
+    })
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e?.message || 'Failed to delete message' })
+  }
+})
 
 app.get('/admin/messages/stream', requireAdminSessionAny, (req, res) => {
   const chatJid = normalizeJid(req.query?.chatJid || '')

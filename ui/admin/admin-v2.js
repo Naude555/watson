@@ -805,6 +805,37 @@ function clearSelectedQuote() {
   updateQuoteHints();
 }
 
+async function deleteMessage(messageId, deleteForAll = true) {
+  try {
+    const id = String(messageId || '').trim();
+    if (!id) throw new Error('Message id required');
+
+    const target = activeChatMessages.find(m => String(m?.id || '') === id);
+    if (!target) throw new Error('Message not found in active chat');
+    if (String(target?.direction || '') !== 'out') throw new Error('Only outbound messages can be deleted');
+    if (String(target?.status || '').toLowerCase() === 'deleted') {
+      toast('Message already deleted', true);
+      return;
+    }
+
+    const deleteLabel = deleteForAll ? 'Delete for everyone?' : 'Soft delete this message?';
+    if (!confirm(deleteLabel)) return;
+
+    await api(`/admin/messages/${encodeURIComponent(id)}/delete`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ deleteForAll })
+    });
+
+    const chatJid = String(currentChat?.jid || '').trim();
+    chatFingerprintByJid.delete(chatJid);
+    if (chatJid) await loadChatMessages(chatJid, true);
+    toast(deleteForAll ? 'Message deleted for everyone' : 'Message soft-deleted', true);
+  } catch (e) {
+    toast(e.message, false);
+  }
+}
+
 function isNearBottom(el, threshold = 140) {
   if (!el) return true;
   return (el.scrollHeight - el.scrollTop - el.clientHeight) <= threshold;
@@ -1419,10 +1450,17 @@ async function loadChatMessages(jid, silent = false) {
         ? '<div class="ops-muted" style="margin-top:6px;font-size:11px;">Deleted on sender side</div>'
         : '';
       const quoteBtn = (m.direction === 'in' && m.id)
-        ? `<div class="msg-actions"><button class="btn-ghost" type="button" onclick="setSelectedQuote('${esc(m.id)}')">Quote</button></div>`
+        ? `<button class="btn-ghost" type="button" onclick="setSelectedQuote('${esc(m.id)}')">Quote</button>`
+        : '';
+      const canDelete = m.direction === 'out' && m.id && status !== 'deleted';
+      const deleteBtn = canDelete
+        ? `<button class="btn-ghost" type="button" onclick="deleteMessage('${esc(m.id)}', true)">Delete</button>`
+        : '';
+      const actions = (quoteBtn || deleteBtn)
+        ? `<div class="msg-actions">${quoteBtn}${deleteBtn}</div>`
         : '';
       const senderLine = showSender ? `<div class="msg-sender">${esc(senderName)}</div>` : '';
-      div.innerHTML = `${senderLine}<div style="white-space:pre-wrap;word-break:break-word;">${esc(m.text || `[${m.type || 'message'}]`).replace(/\n/g,'<br>')}</div>${deletedHint}${previewSlot}${mediaLink}<div class="msg-time">${directionLabel}: ${time} <span class="badge ${status}">${status}</span></div>${quoteBtn}`;
+      div.innerHTML = `${senderLine}<div style="white-space:pre-wrap;word-break:break-word;">${esc(m.text || `[${m.type || 'message'}]`).replace(/\n/g,'<br>')}</div>${deletedHint}${previewSlot}${mediaLink}<div class="msg-time">${directionLabel}: ${time} <span class="badge ${status}">${status}</span></div>${actions}`;
       fragment.appendChild(div);
     }
 

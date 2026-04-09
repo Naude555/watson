@@ -465,6 +465,34 @@ function setSelectedQuote(messageId){
   updateSendQuoteHint();
 }
 
+async function deleteMessage(messageId, deleteForAll = true){
+  try{
+    const id = String(messageId || '').trim();
+    if(!id) throw new Error('Message id required');
+    const msg = findMessageInActiveChat(id);
+    if(!msg) throw new Error('Message not found in active chat');
+    if(msg.direction !== 'out') throw new Error('Only outbound messages can be deleted');
+    if(String(msg.status || '').toLowerCase() === 'deleted'){
+      setStatus('Message already deleted', true);
+      return;
+    }
+
+    const ask = deleteForAll ? 'Delete this message for everyone?' : 'Soft delete this message?';
+    if(!confirm(ask)) return;
+
+    await api('/admin/messages/'+encodeURIComponent(id)+'/delete', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ deleteForAll })
+    });
+
+    setStatus(deleteForAll ? 'Message deleted for everyone' : 'Message soft-deleted', true);
+    await pollOnce(true);
+  }catch(e){
+    setStatus(e.message, false);
+  }
+}
+
 function updateSendQuoteHint(){
   const hint = document.getElementById('sendQuoteHint');
   if(!hint) return;
@@ -638,6 +666,18 @@ function renderOneMessage(m){
     b.style.marginLeft = '8px';
     b.textContent = st || 'status';
     meta.appendChild(b);
+  }
+
+  if(m.direction === 'out' && m.id && String(m.status || '').toLowerCase() !== 'deleted'){
+    const delBtn = document.createElement('button');
+    delBtn.type = 'button';
+    delBtn.className = 'btnGhost';
+    delBtn.style.marginLeft = '8px';
+    delBtn.style.padding = '4px 8px';
+    delBtn.style.fontSize = '12px';
+    delBtn.textContent = 'Delete';
+    delBtn.addEventListener('click', () => deleteMessage(m.id, true));
+    meta.appendChild(delBtn);
   }
 
   const body = document.createElement('div');
