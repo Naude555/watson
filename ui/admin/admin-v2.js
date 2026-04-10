@@ -33,6 +33,25 @@ const linkPreviewCache = new Map();
 let chatFetchLimit = 500;
 const CHAT_RENDER_LIMIT = 500;
 
+const APP_BASE_PATH = (() => {
+  try {
+    const p = String(window.location.pathname || '');
+    const idx = p.indexOf('/admin/');
+    if (idx <= 0) return '';
+    return p.slice(0, idx).replace(/\/+$/, '');
+  } catch {
+    return '';
+  }
+})();
+
+function withBase(path = '') {
+  const p = String(path || '').trim();
+  if (!p) return APP_BASE_PATH || '';
+  if (/^https?:\/\//i.test(p) || p.startsWith('//')) return p;
+  if (p.startsWith('/')) return `${APP_BASE_PATH}${p}`;
+  return APP_BASE_PATH ? `${APP_BASE_PATH}/${p.replace(/^\/+/, '')}` : `/${p.replace(/^\/+/, '')}`;
+}
+
 const contactNameByJid = new Map();
 const contactNameByMsisdn = new Map();
 const groupAliasByJid = new Map();
@@ -232,7 +251,7 @@ async function ensureAdminCsrfToken(force = false) {
   if (!force && adminCsrfPromise) return adminCsrfPromise;
 
   adminCsrfPromise = (async () => {
-    const res = await fetch('/admin/csrf', { credentials: 'same-origin' });
+    const res = await fetch(withBase('/admin/csrf'), { credentials: 'same-origin' });
     const text = await res.text();
     let json = null;
     try { json = JSON.parse(text); } catch {}
@@ -254,20 +273,21 @@ async function api(path, opts = {}) {
   const options = { ...opts };
   const method = String(options.method || 'GET').toUpperCase();
   options.headers = { ...(options.headers || {}) };
+  const requestPath = withBase(path);
 
   if (isMutatingMethod(method) && path !== '/admin/login') {
     if (!adminCsrfToken) await ensureAdminCsrfToken();
     if (adminCsrfToken) options.headers['x-csrf-token'] = adminCsrfToken;
   }
 
-  const res = await fetch(path, options);
+  const res = await fetch(requestPath, options);
   const text = await res.text();
   let json = null;
   try { json = JSON.parse(text); } catch {}
   
   if (!res.ok) {
     if (res.status === 401) {
-      window.location.href = '/admin/login';
+      window.location.href = withBase('/admin/login');
       throw new Error('Unauthorized');
     }
     if (res.status === 403 && isMutatingMethod(method) && String(path).startsWith('/admin/')) {
@@ -275,7 +295,7 @@ async function api(path, opts = {}) {
       await ensureAdminCsrfToken(true);
       if (adminCsrfToken) {
         options.headers['x-csrf-token'] = adminCsrfToken;
-        const retry = await fetch(path, options);
+        const retry = await fetch(requestPath, options);
         const retryText = await retry.text();
         let retryJson = null;
         try { retryJson = JSON.parse(retryText); } catch {}
@@ -1243,7 +1263,7 @@ function applyChatSummaryUpdate(summary) {
 function connectMessagesStream() {
   if (messagesES) return;
 
-  messagesES = new EventSource('/admin/messages/stream');
+  messagesES = new EventSource(withBase('/admin/messages/stream'));
 
   messagesES.addEventListener('hello', () => {
     messagesStreamLive = true;
@@ -2041,7 +2061,7 @@ function updatePairingStatusUi(data = {}) {
 function connectPairingStream() {
   if (pairingES) return;
 
-  pairingES = new EventSource('/admin/pairing/stream');
+  pairingES = new EventSource(withBase('/admin/pairing/stream'));
 
   pairingES.addEventListener('status', (e) => {
     try {
@@ -2079,7 +2099,7 @@ function connectPairingStream() {
               img.onerror = () => {
                 pairingQrRequestInFlight = false;
                 img.dataset.qrReady = '0';
-                setPairingQrImage(`/admin/pairing/qr.png?v=${encodeURIComponent(fallbackVersion)}&t=${Date.now()}`);
+                setPairingQrImage(withBase(`/admin/pairing/qr.png?v=${encodeURIComponent(fallbackVersion)}&t=${Date.now()}`));
               };
               setPairingQrImage(dataUrl);
               return;
@@ -2130,7 +2150,7 @@ async function refreshQr(options = {}) {
     if (!quiet) toast('QR not ready yet', false);
   };
   const bust = force ? `&t=${Date.now()}` : '';
-  setPairingQrImage(`/admin/pairing/qr.png?v=${encodeURIComponent(requestKey)}${bust}`);
+  setPairingQrImage(withBase(`/admin/pairing/qr.png?v=${encodeURIComponent(requestKey)}${bust}`));
 }
 
 function manualRefreshQr() {
@@ -3771,7 +3791,7 @@ async function logout() {
   try {
     await api('/admin/logout', { method: 'POST' });
   } catch {}
-  window.location.href = '/admin/login';
+  window.location.href = withBase('/admin/login');
 }
 
 // Utility

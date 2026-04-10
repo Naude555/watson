@@ -4581,7 +4581,7 @@ function requireAdminSessionAny(req, res, next) {
     return next()
   }
   const acceptsHtml = String(req.headers.accept || '').includes('text/html')
-  if (acceptsHtml) return res.redirect('/admin/login')
+  if (acceptsHtml) return res.redirect(withBase(req, '/admin/login'))
   return res.status(401).json({ ok: false, error: 'Unauthorized' })
 }
 
@@ -4944,7 +4944,8 @@ function noticeBoardPageHtml(slug, board) {
 </html>`
 }
 
-function adminLoginPageHtml() {
+function adminLoginPageHtml(req) {
+  const loginAction = withBase(req, '/admin/login')
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -4962,7 +4963,7 @@ function adminLoginPageHtml() {
   </style>
 </head>
 <body>
-  <form class="card" method="post" action="/admin/login">
+  <form class="card" method="post" action="${loginAction}">
     <h1>Watson Admin Login</h1>
     <p>Enter an admin, operator, or viewer key to access the dashboard.</p>
     <input type="password" name="adminKey" placeholder="WA_ADMIN_KEY / WA_OPERATOR_KEY / WA_VIEWER_KEY" autocomplete="current-password" required />
@@ -6090,7 +6091,30 @@ async function processDueSchedules() {
  */
 const app = express()
 app.disable('x-powered-by')
-app.set('trust proxy', 1)
+app.set('trust proxy', true)
+
+function normalizeForwardedPrefix(raw = '') {
+  const s = String(raw || '').trim()
+  if (!s) return ''
+  const first = s.split(',')[0].trim()
+  if (!first) return ''
+  const prefixed = first.startsWith('/') ? first : `/${first}`
+  return prefixed.replace(/\/+$/, '')
+}
+
+function withBase(req, path = '') {
+  const base = normalizeForwardedPrefix(req?.headers?.['x-forwarded-prefix'] || req?.basePath || '')
+  const p = String(path || '').trim()
+  if (!p) return base || ''
+  if (/^https?:\/\//i.test(p)) return p
+  const nextPath = p.startsWith('/') ? p : `/${p}`
+  return `${base}${nextPath}`
+}
+
+app.use((req, res, next) => {
+  req.basePath = normalizeForwardedPrefix(req.headers['x-forwarded-prefix'] || '')
+  next()
+})
 
 // allow inline scripts in admin/pairing UI
 app.use(helmet({ contentSecurityPolicy: false }))
@@ -6142,14 +6166,14 @@ registerAdminMiddlewares({
 })
 
 app.get('/', (req, res) => {
-  res.redirect('/admin/ui')
+  res.redirect(withBase(req, '/admin/ui'))
 })
 
 app.get('/admin/login', (req, res) => {
   if (!REQUIRE_ADMIN_KEY) return res.status(500).send('Admin keys not set (WA_ADMIN_KEY / WA_OPERATOR_KEY / WA_VIEWER_KEY)')
-  if (hasValidAdminSession(req)) return res.redirect('/admin/ui')
+  if (hasValidAdminSession(req)) return res.redirect(withBase(req, '/admin/ui'))
   res.setHeader('Content-Type', 'text/html; charset=utf-8')
-  res.send(adminLoginPageHtml())
+  res.send(adminLoginPageHtml(req))
 })
 
 app.post('/admin/login', (req, res) => {
@@ -6169,7 +6193,7 @@ app.post('/admin/login', (req, res) => {
       userAgent: req.get('user-agent') || '',
       durationMs: 0
     })
-    return res.redirect('/admin/login?e=' + encodeURIComponent('Invalid key'))
+    return res.redirect(withBase(req, '/admin/login?e=' + encodeURIComponent('Invalid key')))
   }
   setAdminSessionCookie(res, role)
   setAdminCsrfCookie(res, generateCsrfToken())
@@ -6185,7 +6209,7 @@ app.post('/admin/login', (req, res) => {
     userAgent: req.get('user-agent') || '',
     durationMs: 0
   })
-  return res.redirect('/admin/ui')
+  return res.redirect(withBase(req, '/admin/ui'))
 })
 
 app.post('/admin/logout', requireAdminSessionAny, (req, res) => {
@@ -6345,7 +6369,7 @@ app.get('/admin/pairing/stream', adminKeyMiddleware, servePairingStream)
  * Pairing UI (kept as you provided)
  */
 app.get('/pairing/ui', (req, res) => {
-  return res.redirect('/admin/ui')
+  return res.redirect(withBase(req, '/admin/ui'))
 })
 
 /**
@@ -8312,7 +8336,7 @@ if (req.file?.path) {
  * Admin UI (dynamic messages + send panel) — Black/Yellow/Purple theme + Multi-send
  */
 app.get('/admin/ui', (req, res) => {
-  if (!hasValidAdminSession(req)) return res.redirect('/admin/login')
+  if (!hasValidAdminSession(req)) return res.redirect(withBase(req, '/admin/login'))
   res.setHeader('Content-Type', 'text/html; charset=utf-8')
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
   res.setHeader('Pragma', 'no-cache')
@@ -8321,7 +8345,7 @@ app.get('/admin/ui', (req, res) => {
 })
 
 app.get('/admin/ui-legacy', (req, res) => {
-  if (!hasValidAdminSession(req)) return res.redirect('/admin/login')
+  if (!hasValidAdminSession(req)) return res.redirect(withBase(req, '/admin/login'))
   res.setHeader('Content-Type', 'text/html; charset=utf-8')
   res.sendFile(path.join(UI_DIR, 'admin', 'admin.html'))
 })
