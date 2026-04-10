@@ -215,6 +215,15 @@ const WA_QUEUE_NAME = String(process.env.WA_QUEUE_NAME || 'wa-send')
 
 // Optional global limiter (in addition to your BASE/JITTER)
 const WA_GLOBAL_MIN_GAP_MS_DEFAULT = Number(process.env.WA_GLOBAL_MIN_GAP_MS || 0)
+const WA_WEB_VERSION_OVERRIDE = String(process.env.WA_WEB_VERSION_OVERRIDE || '').trim()
+
+function parseWaVersionOverride(raw = '') {
+  const s = String(raw || '').trim()
+  if (!s) return null
+  const parts = s.split('.').map(v => Number(v))
+  if (parts.length < 3 || parts.some(v => !Number.isFinite(v) || v < 0)) return null
+  return [parts[0], parts[1], parts[2]]
+}
 
 
 function defaultAutomationsConfig() {
@@ -5065,9 +5074,13 @@ async function startWhatsApp() {
   // Preload all auth keys into memory cache BEFORE handshake to avoid sync DB hits
   await preloadAuthKeysToCache()
 
-  let waVersion = undefined
+  let waVersion = parseWaVersionOverride(WA_WEB_VERSION_OVERRIDE) || undefined
+  if (waVersion) {
+    console.log('📦 Using WA Web version override from WA_WEB_VERSION_OVERRIDE:', waVersion.join('.'))
+  }
+
   const forceLatestWaVersion = String(process.env.WA_FORCE_LATEST_WEB_VERSION || '').trim() === '1' || preferLatestWaVersion
-  if (forceLatestWaVersion) {
+  if (!waVersion && forceLatestWaVersion) {
     try {
       const info = await fetchLatestBaileysVersion()
       if (Array.isArray(info?.version) && info.version.length) {
@@ -5277,11 +5290,11 @@ async function startWhatsApp() {
         // Safety valve: for sustained 405 without QR, restart socket with long cooldown.
         const now = Date.now()
         const noQrYet = !lastQR && lastQRUpdatedAt <= 0
-        if (noQrYet && reconnectAttemptCount >= 8 && now - lastNoQrRecoveryAt >= 10 * 60 * 1000) {
+        if (noQrYet && reconnectAttemptCount >= 6 && now - lastNoQrRecoveryAt >= 5 * 60 * 1000) {
           lastNoQrRecoveryAt = now
-          console.log('⚠️ Sustained 405 failures without QR. Performing cooled-down socket restart...')
+          console.log('⚠️ Sustained 405 failures without QR. Performing force re-pair recovery...')
           try {
-            await triggerRelink('status-405-sustained-no-qr')
+            await triggerRelink('status-405-sustained-no-qr', { clearAuth: true })
           } catch (e) {
             console.warn('❌ 405 sustained recovery relink failed:', e?.message)
           }
@@ -6247,7 +6260,12 @@ app.get('/health', async (req, res) => {
  */
 async function servePairingQrPng(req, res) {
   try {
-    if (!lastQR) return res.status(404).send('No QR available')
+    if (!lastQR) {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+      res.setHeader('Pragma', 'no-cache')
+      res.setHeader('Expires', '0')
+      return res.status(204).end()
+    }
     res.setHeader('Content-Type', 'image/png')
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
     res.setHeader('Pragma', 'no-cache')
