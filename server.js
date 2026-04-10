@@ -225,6 +225,13 @@ function parseWaVersionOverride(raw = '') {
   return [parts[0], parts[1], parts[2]]
 }
 
+// Known-good WA Web versions, newest first. Used as ordered fallbacks when auto-fetch
+// fails or a 405 is received. Extend this list when a new working version is confirmed.
+const WA_KNOWN_VERSIONS = [
+  [2, 3000, 1035194821],
+  [2, 3000, 1023223821],
+]
+
 
 function defaultAutomationsConfig() {
   return {
@@ -4207,6 +4214,7 @@ let lastNoQrRecoveryAt = 0
 let startWhatsAppInProgress = false
 let walHandshakeInProgress = false  // true between makeWASocket() and first open/close event — suppresses DB key writes
 let preferLatestWaVersion = false   // auto-enabled after repeated 405 failures
+let waVersionFallbackIndex = -1     // -1 = try auto-fetch; >=0 = cycle through WA_KNOWN_VERSIONS
 
 async function clearAuthStorage() {
   await clearAuthFromDb().catch((e) => { console.warn('⚠️ Failed to clear auth from DB:', e?.message) })
@@ -5077,21 +5085,30 @@ async function startWhatsApp() {
   let waVersion = parseWaVersionOverride(WA_WEB_VERSION_OVERRIDE) || undefined
   if (waVersion) {
     console.log('📦 Using WA Web version override from WA_WEB_VERSION_OVERRIDE:', waVersion.join('.'))
-  }
-
-  const forceLatestWaVersion = String(process.env.WA_FORCE_LATEST_WEB_VERSION || '').trim() === '1' || preferLatestWaVersion
-  if (!waVersion && forceLatestWaVersion) {
-    try {
-      const info = await fetchLatestBaileysVersion()
-      if (Array.isArray(info?.version) && info.version.length) {
-        waVersion = info.version
-        console.log('📦 Using WA Web version:', waVersion.join('.'), '| isLatest:', Boolean(info?.isLatest))
-      }
-    } catch (e) {
-      console.warn('⚠️ Failed to fetch latest WA Web version:', e?.message)
-    }
+  } else if (waVersionFallbackIndex >= 0 && WA_KNOWN_VERSIONS.length > 0) {
+    // A 405 occurred previously — cycle through the known-good fallback list
+    const idx = waVersionFallbackIndex % WA_KNOWN_VERSIONS.length
+    waVersion = WA_KNOWN_VERSIONS[idx]
+    console.log(`📦 Using fallback WA Web version [${idx + 1}/${WA_KNOWN_VERSIONS.length}]: ${waVersion.join('.')} (after ${waVersionFallbackIndex} 405 attempt(s))`)
   } else {
-    console.log('📦 Using Baileys default WA Web version (WA_FORCE_LATEST_WEB_VERSION!=1)')
+    // No override, no 405 yet — try auto-fetching the latest supported version
+    const forceLatest = String(process.env.WA_FORCE_LATEST_WEB_VERSION || '').trim() === '1' || preferLatestWaVersion
+    if (forceLatest) {
+      try {
+        const info = await fetchLatestBaileysVersion()
+        if (Array.isArray(info?.version) && info.version.length) {
+          waVersion = info.version
+          console.log('📦 Using WA Web version (auto-fetch):', waVersion.join('.'), '| isLatest:', Boolean(info?.isLatest))
+          if (!info.isLatest) {
+            console.warn('⚠️ Fetched WA version may not be the latest — will use fallback versions if 405 occurs.')
+          }
+        }
+      } catch (e) {
+        console.warn('⚠️ Failed to fetch latest WA Web version:', e?.message)
+      }
+    } else {
+      console.log('📦 Using Baileys default WA Web version (WA_FORCE_LATEST_WEB_VERSION!=1)')
+    }
   }
 
   sock = makeWASocket({
@@ -5232,6 +5249,8 @@ async function startWhatsApp() {
       walHandshakeInProgress = false
       if (keysPersistPending) flushKeysPersist().catch(() => {})
       reconnectAttemptCount = 0
+      waVersionFallbackIndex = -1     // reset: next connect will auto-fetch latest again
+      preferLatestWaVersion = false   // cleared by successful connect
       connectionStatus = 'open'
       lastQR = null
       lastQRUpdatedAt = 0
@@ -5282,6 +5301,7 @@ async function startWhatsApp() {
         // 405 is often transient WA-side connection failure/rate-limiting.
         // Keep auth intact. Auth reset is manual-only from Pairing > Force Re-pair.
         preferLatestWaVersion = true
+        waVersionFallbackIndex = Math.max(0, waVersionFallbackIndex + 1)  // advance fallback version for next retry
 
         const retryDelay = computeStatus405DelayMs(reconnectAttemptCount)
         console.log(`⚠️ Status 405 detected. Retrying in ${Math.round(retryDelay / 1000)}s (auth preserved, latest WA version preferred).`)

@@ -1178,6 +1178,128 @@
       -webkit-overflow-scrolling: touch;
       padding-right: 4px;
     }
+
+    /* ── Mobile back button (hidden on desktop) ── */
+    .mobile-back-btn {
+      display: none !important;
+      flex-shrink: 0;
+    }
+
+    /* ── Mobile bottom navigation bar ── */
+    .mobile-nav {
+      display: none;
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: 58px;
+      background: #111318;
+      border-top: 1px solid #22252d;
+      z-index: 500;
+      overflow-x: auto;
+      overflow-y: hidden;
+      -webkit-overflow-scrolling: touch;
+      overscroll-behavior-x: contain;
+      scrollbar-width: none;
+      align-items: stretch;
+    }
+    .mobile-nav::-webkit-scrollbar { display: none; }
+
+    .mob-nav-item {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 2px;
+      min-width: 68px;
+      padding: 6px 8px;
+      background: transparent !important;
+      border: none !important;
+      border-top: 2px solid transparent !important;
+      color: #666;
+      font-size: 10px;
+      border-radius: 0 !important;
+      cursor: pointer;
+      flex-shrink: 0;
+      transform: none !important;
+      transition: color 0.15s, border-top-color 0.15s;
+      position: relative;
+    }
+    .mob-nav-item:hover {
+      background: #1a1d26 !important;
+      color: #ccc;
+      opacity: 1 !important;
+      transform: none !important;
+    }
+    .mob-nav-item.active {
+      color: #b14dff;
+      border-top-color: #b14dff !important;
+    }
+    .mob-nav-icon { font-size: 18px; line-height: 1; }
+    .mob-nav-label { font-size: 9px; white-space: nowrap; font-weight: 500; }
+    .mob-nav-unread {
+      position: absolute;
+      top: 5px;
+      right: 10px;
+      min-width: 16px;
+      height: 16px;
+      padding: 0 4px;
+      border-radius: 999px;
+      font-size: 8px;
+      font-weight: 700;
+      color: #fff;
+      background: #ef4444;
+      display: none;
+      align-items: center;
+      justify-content: center;
+    }
+    .mob-nav-unread.visible { display: inline-flex; }
+
+    /* ── Phone layout (≤768px) ── */
+    @media (max-width: 768px) {
+      .app {
+        height: calc(100vh - 58px); /* leave room for mobile nav */
+      }
+      .mobile-nav {
+        display: flex;
+      }
+      .mobile-back-btn {
+        display: inline-flex !important;
+      }
+      .content {
+        padding: 10px;
+      }
+      /* Messages panel: full-bleed so chat fills the screen */
+      .content:has(> #panelMessages.active) {
+        padding: 0;
+      }
+      .header {
+        padding: 8px 12px;
+      }
+      .header-left h1 {
+        font-size: 15px;
+      }
+      /* wa-shell: borderless on phone */
+      .wa-shell {
+        border-radius: 0;
+        border-left: none;
+        border-right: none;
+        border-bottom: none;
+      }
+      /* Default: show chat list full-screen */
+      .wa-shell[data-mobile="list"] .wa-right { display: none; }
+      .wa-shell[data-mobile="list"] .wa-left {
+        max-height: none !important;
+        height: 100%;
+      }
+      /* Chat selected: hide list, chat takes full screen */
+      .wa-shell[data-mobile="chat"] .wa-left { display: none; }
+      .wa-shell[data-mobile="chat"] .wa-right {
+        display: flex;
+        height: 100%;
+      }
+      .grid-2 { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
@@ -1192,15 +1314,15 @@
       </div>
       
       <div class="nav">
-        <button class="nav-item icon active" id="navMessagesBtn" onclick="showPanel('messages', this)">📨 Messages <span id="messagesNavUnreadBadge" class="nav-unread-badge"></span></button>
-        <button class="nav-item icon" onclick="showPanel('send', this)">📤 Send</button>
-        <button class="nav-item icon" onclick="showPanel('pairing', this)">🔗 Pairing</button>
-        <button class="nav-item icon" onclick="showPanel('contacts', this)">👤 Contacts</button>
-        <button class="nav-item icon" onclick="showPanel('groups', this)">👥 Groups</button>
-        <button class="nav-item icon" onclick="showPanel('rules', this)">🧠 Rules</button>
-        <button class="nav-item icon" onclick="showPanel('templates', this)">🧩 Templates</button>
-        <button class="nav-item icon" onclick="showPanel('schedule', this)">⏱️ Schedule</button>
-        <button class="nav-item icon" onclick="showPanel('ops', this)">⚙️ Operations</button>
+        <button class="nav-item icon active" data-panel="messages" id="navMessagesBtn" onclick="showPanel('messages', this)">📨 Messages <span id="messagesNavUnreadBadge" class="nav-unread-badge"></span></button>
+        <button class="nav-item icon" data-panel="send" onclick="showPanel('send', this)">📤 Send</button>
+        <button class="nav-item icon" data-panel="pairing" onclick="showPanel('pairing', this)">🔗 Pairing</button>
+        <button class="nav-item icon" data-panel="contacts" onclick="showPanel('contacts', this)">👤 Contacts</button>
+        <button class="nav-item icon" data-panel="groups" onclick="showPanel('groups', this)">👥 Groups</button>
+        <button class="nav-item icon" data-panel="rules" onclick="showPanel('rules', this)">🧠 Rules</button>
+        <button class="nav-item icon" data-panel="templates" onclick="showPanel('templates', this)">🧩 Templates</button>
+        <button class="nav-item icon" data-panel="schedule" onclick="showPanel('schedule', this)">⏱️ Schedule</button>
+        <button class="nav-item icon" data-panel="ops" onclick="showPanel('ops', this)">⚙️ Operations</button>
       </div>
       
       <div class="status-bar">
@@ -1223,7 +1345,7 @@
       <div class="content">
         <!-- MESSAGES -->
         <div class="panel active" id="panelMessages">
-          <div class="wa-shell">
+          <div class="wa-shell" id="waShell" data-mobile="list">
             <div class="wa-left">
               <div class="wa-left-head">
                 <h3>Chats</h3>
@@ -1240,7 +1362,8 @@
             <div class="wa-right">
               <div class="wa-head">
                 <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
-                  <div>
+                  <button class="btn-ghost mobile-back-btn" type="button" onclick="mobileBackToChats()">← Chats</button>
+                  <div style="flex:1;min-width:0;">
                     <div class="wa-head-title" id="chatTitle">No chat selected</div>
                     <div class="wa-head-sub">📱 <span id="chatInfo">No chat selected</span></div>
                   </div>
@@ -1954,6 +2077,47 @@
     </div>
   </div>
   
+  <!-- Mobile bottom navigation bar -->
+  <nav class="mobile-nav" id="mobileNav" aria-label="Navigation">
+    <button class="mob-nav-item active" data-panel="messages" onclick="showPanel('messages', this)">
+      <span class="mob-nav-icon">📨</span>
+      <span class="mob-nav-label">Messages</span>
+      <span class="mob-nav-unread" id="mobNavMessagesBadge"></span>
+    </button>
+    <button class="mob-nav-item" data-panel="send" onclick="showPanel('send', this)">
+      <span class="mob-nav-icon">📤</span>
+      <span class="mob-nav-label">Send</span>
+    </button>
+    <button class="mob-nav-item" data-panel="pairing" onclick="showPanel('pairing', this)">
+      <span class="mob-nav-icon">🔗</span>
+      <span class="mob-nav-label">Pairing</span>
+    </button>
+    <button class="mob-nav-item" data-panel="contacts" onclick="showPanel('contacts', this)">
+      <span class="mob-nav-icon">👤</span>
+      <span class="mob-nav-label">Contacts</span>
+    </button>
+    <button class="mob-nav-item" data-panel="groups" onclick="showPanel('groups', this)">
+      <span class="mob-nav-icon">👥</span>
+      <span class="mob-nav-label">Groups</span>
+    </button>
+    <button class="mob-nav-item" data-panel="rules" onclick="showPanel('rules', this)">
+      <span class="mob-nav-icon">🧠</span>
+      <span class="mob-nav-label">Rules</span>
+    </button>
+    <button class="mob-nav-item" data-panel="templates" onclick="showPanel('templates', this)">
+      <span class="mob-nav-icon">🧩</span>
+      <span class="mob-nav-label">Templates</span>
+    </button>
+    <button class="mob-nav-item" data-panel="schedule" onclick="showPanel('schedule', this)">
+      <span class="mob-nav-icon">⏱️</span>
+      <span class="mob-nav-label">Schedule</span>
+    </button>
+    <button class="mob-nav-item" data-panel="ops" onclick="showPanel('ops', this)">
+      <span class="mob-nav-icon">⚙️</span>
+      <span class="mob-nav-label">Ops</span>
+    </button>
+  </nav>
+
   <div class="toast hidden" id="toast"></div>
   
   <script src="/admin/assets/admin-v2.js?v=20260403-04"></script>

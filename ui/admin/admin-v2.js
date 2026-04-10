@@ -108,12 +108,15 @@ function refreshMessagesNavUnreadBadge() {
   let total = 0;
   for (const c of chats || []) total += getUnreadCount(c?.jid);
   if (total <= 0) {
-    badge.style.display = 'none';
-    badge.textContent = '';
+      if (badge) { badge.style.display = 'none'; badge.textContent = ''; }
+      const mob = document.getElementById('mobNavMessagesBadge');
+      if (mob) mob.classList.remove('visible');
     return;
   }
-  badge.style.display = 'inline-flex';
-  badge.textContent = total > 99 ? '99+' : String(total);
+    const text = total > 99 ? '99+' : String(total);
+    if (badge) { badge.style.display = 'inline-flex'; badge.textContent = text; }
+    const mob = document.getElementById('mobNavMessagesBadge');
+    if (mob) { mob.textContent = text; mob.classList.add('visible'); }
 }
 
 function markChatAsRead(jid, msgs = []) {
@@ -178,8 +181,9 @@ function showPanel(name, btnEl) {
   document.getElementById('panelSchedule').classList.toggle('active', name === 'schedule');
   document.getElementById('panelOps').classList.toggle('active', name === 'ops');
   
-  document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
-  if (btnEl) btnEl.classList.add('active');
+    // Sync active state across sidebar nav + mobile nav using data-panel attribute
+    document.querySelectorAll('.nav-item, .mob-nav-item').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll(`[data-panel="${name}"]`).forEach(b => b.classList.add('active'));
   
   const titles = {
     messages: 'Messages',
@@ -1286,6 +1290,11 @@ function connectMessagesStream() {
   };
 }
 
+function mobileBackToChats() {
+  const shell = document.getElementById('waShell');
+  if (shell) shell.dataset.mobile = 'list';
+}
+
 async function selectChat(selectedJid = '') {
   const sel = document.getElementById('chatSelect');
   const jid = String(selectedJid || sel?.value || '').trim();
@@ -1309,6 +1318,12 @@ async function selectChat(selectedJid = '') {
   else renderBoards([]);
   updateQuoteHints();
   renderChats();
+
+    // On mobile: slide to the chat message view
+    if (window.matchMedia('(max-width: 768px)').matches) {
+      const shell = document.getElementById('waShell');
+      if (shell) shell.dataset.mobile = 'chat';
+    }
 
   if (messagesStreamLive) stopChatPollingFallback();
   else startChatPollingFallback();
