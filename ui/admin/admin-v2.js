@@ -14,6 +14,9 @@ let selectedGroupJid = '';
 let chatPollTimer = null;
 let messagesES = null;
 let messagesESRetryTimer = null;
+let messagesWatchdogTimer = null;
+let chatsSummaryPollTimer = null;
+let lastMessagesSseActivityAt = 0;
 let messagesStreamLive = false;
 let chatRefreshTimer = null;
 let activeChatMessages = [];
@@ -222,7 +225,10 @@ function showPanel(name, btnEl) {
     connectPairingStream();
     refreshQr({ quiet: true, force: true });
   }
-  if (name === 'messages') connectMessagesStream();
+  if (name === 'messages') {
+    connectMessagesStream();
+    handleUiResume();
+  }
   if (name === 'messages' && currentChat?.jid) {
     loadChatMessages(currentChat.jid, true).catch(() => {});
   }
@@ -1050,7 +1056,8 @@ function canonicalizeChatJidForUi(raw) {
   return canonicalChatJidByAlias.get(normalized) || normalized;
 }
 
-async function loadChats() {
+async function loadChats(options = {}) {
+  const silent = Boolean(options?.silent);
   try {
     const [targets, chatData] = await Promise.all([
       api('/admin/targets'),
@@ -1135,7 +1142,7 @@ async function loadChats() {
     
     renderChats();
   } catch (e) {
-    toast(e.message, false);
+    if (!silent) toast(e.message, false);
   }
 }
 
@@ -1260,12 +1267,49 @@ function applyChatSummaryUpdate(summary) {
   renderChats();
 }
 
+function isMessagesPanelActive() {
+  const panel = document.getElementById('panelMessages');
+  return Boolean(panel && panel.classList.contains('active'));
+}
+
+function markMessagesSseActivity() {
+  lastMessagesSseActivityAt = Date.now();
+}
+
+function startChatsSummaryPolling() {
+  if (chatsSummaryPollTimer) return;
+  chatsSummaryPollTimer = setInterval(() => {
+    if (!isMessagesPanelActive()) return;
+    loadChats({ silent: true }).catch(() => {});
+    if (!messagesStreamLive && currentChat?.jid) {
+      loadChatMessages(currentChat.jid, true).catch(() => {});
+    }
+  }, 7000);
+}
+
+function startMessagesWatchdog() {
+  if (messagesWatchdogTimer) return;
+  messagesWatchdogTimer = setInterval(() => {
+    if (!isMessagesPanelActive()) return;
+    const staleMs = Date.now() - Number(lastMessagesSseActivityAt || 0);
+    if (!messagesES || !messagesStreamLive || staleMs > 35000) {
+      try { messagesES?.close?.(); } catch {}
+      messagesES = null;
+      messagesStreamLive = false;
+      connectMessagesStream();
+      loadChats({ silent: true }).catch(() => {});
+    }
+  }, 12000);
+}
+
 function connectMessagesStream() {
   if (messagesES) return;
 
+  markMessagesSseActivity();
   messagesES = new EventSource(withBase('/admin/messages/stream'));
 
   messagesES.addEventListener('hello', () => {
+    markMessagesSseActivity();
     messagesStreamLive = true;
     stopChatPollingFallback();
     if (messagesESRetryTimer) {
@@ -1276,6 +1320,7 @@ function connectMessagesStream() {
 
   messagesES.addEventListener('message-update', (evt) => {
     try {
+      markMessagesSseActivity();
       const data = JSON.parse(evt.data || '{}');
       const chatJid = canonicalizeChatJidForUi(data?.chatJid || '');
       if (!chatJid) return;
@@ -1294,6 +1339,10 @@ function connectMessagesStream() {
       if (data?.summary) applyChatSummaryUpdate(data.summary);
       scheduleActiveChatRefresh(chatJid);
     } catch {}
+  });
+
+  messagesES.addEventListener('ping', () => {
+    markMessagesSseActivity();
   });
 
   messagesES.onerror = () => {
@@ -3801,6 +3850,13 @@ function esc(str) {
   return div.innerHTML;
 }
 
+function handleUiResume() {
+  if (!isMessagesPanelActive()) return;
+  loadChats({ silent: true }).catch(() => {});
+  if (currentChat?.jid) loadChatMessages(currentChat.jid, true).catch(() => {});
+  if (!messagesES || !messagesStreamLive) connectMessagesStream();
+}
+
 // Bootstrap
 async function init() {
   try {
@@ -3817,6 +3873,12 @@ async function init() {
     toast('Connected', true);
     updateQuoteHints();
     connectMessagesStream();
+    startChatsSummaryPolling();
+    startMessagesWatchdog();
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') handleUiResume();
+    });
+    window.addEventListener('focus', handleUiResume);
 
     const sel = document.getElementById('chatSelect');
     if (sel && sel.options.length > 1) {
