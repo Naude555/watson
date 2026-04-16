@@ -1679,6 +1679,23 @@
             
             <div class="label" style="margin-top: 8px;">Auto Reply</div>
             <textarea id="ruleReply" placeholder="Reply message…" style="height: 60px;"></textarea>
+
+            <div class="label" style="margin-top: 8px;">Cooldown</div>
+            <select id="ruleCooldownPreset" onchange="onRuleCooldownPresetChange()">
+              <option value="0">No cooldown</option>
+              <option value="30000" selected>30 seconds</option>
+              <option value="300000">5 minutes</option>
+              <option value="3600000">1 hour</option>
+              <option value="21600000">6 hours</option>
+              <option value="43200000">12 hours</option>
+              <option value="86400000">24 hours (once per day)</option>
+              <option value="custom">Custom…</option>
+            </select>
+
+            <div id="ruleCooldownCustomBox" style="display:none;">
+              <div class="label" style="margin-top: 8px;">Custom Cooldown (ms)</div>
+              <input id="ruleCooldownMs" type="number" min="0" step="1000" value="30000" oninput="onRuleCooldownInputChange()" />
+            </div>
             
             <div class="row" style="margin-top: 12px;">
               <button onclick="saveRule()" style="flex:1;">Save Rule</button>

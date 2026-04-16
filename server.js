@@ -169,7 +169,20 @@ const AUTO_REPLY_MATCH_VALUE_DEFAULT = process.env.AUTO_REPLY_MATCH_VALUE || 'he
 const AUTO_REPLY_TEXT_DEFAULT = process.env.AUTO_REPLY_TEXT || 'Hi 👋 How can I help?'
 const AUTO_REPLY_COOLDOWN_MS_DEFAULT = Number(process.env.AUTO_REPLY_COOLDOWN_MS || 30000)
 const AUTO_REPLY_GROUP_PREFIX_DEFAULT = process.env.AUTO_REPLY_GROUP_PREFIX || '!bot'
+const GROUP_CACHE_REFRESH_MIN_GAP_MS = Math.max(5000, Number(process.env.GROUP_CACHE_REFRESH_MIN_GAP_MS || 30000))
+const GROUP_CACHE_REFRESH_DEBOUNCE_MS = Math.max(250, Number(process.env.GROUP_CACHE_REFRESH_DEBOUNCE_MS || 1500))
+const GROUP_CACHE_SYNC_INTERVAL_MS = Math.max(60000, Number(process.env.GROUP_CACHE_SYNC_INTERVAL_MS || 180000))
+// Map key format: "instanceId:chatJid" to ensure isolation between multiple instances
 const lastAutoReplyAt = new Map()
+
+// ----------------------------
+// Instance Isolation (multi-instance support)
+// ----------------------------
+// INSTANCE_ID can be set to manually isolate multiple instances on same Redis
+// If not set, it will be auto-derived from the connected WhatsApp JID
+const INSTANCE_ID_OVERRIDE = String(process.env.INSTANCE_ID || '').trim()
+let currentInstanceId = INSTANCE_ID_OVERRIDE || 'default'  // will be updated on socket connection
+let currentWhatsAppJid = ''  // will be set on socket connection
 
 // ----------------------------
 // n8n Automations
@@ -211,11 +224,27 @@ const MEDIA_SIGNING_SECRET = MEDIA_SIGNING_SECRETS[0] || ''
 // Redis (for queue, optional)
 // ----------------------------
 const REDIS_URL = String(process.env.REDIS_URL || 'redis://redis:6379')
-const WA_QUEUE_NAME = String(process.env.WA_QUEUE_NAME || 'wa-send')
+const WA_QUEUE_NAME_BASE = String(process.env.WA_QUEUE_NAME || 'wa-send')
 
 // Optional global limiter (in addition to your BASE/JITTER)
 const WA_GLOBAL_MIN_GAP_MS_DEFAULT = Number(process.env.WA_GLOBAL_MIN_GAP_MS || 0)
 const WA_WEB_VERSION_OVERRIDE = String(process.env.WA_WEB_VERSION_OVERRIDE || '').trim()
+
+// Get the effective queue name for this instance
+// This ensures each WhatsApp number gets its own queue, preventing crosstalk
+function getWaQueueName() {
+  if (INSTANCE_ID_OVERRIDE) {
+    // If explicitly set, use it
+    return `${WA_QUEUE_NAME_BASE}-${INSTANCE_ID_OVERRIDE}`
+  }
+  if (currentWhatsAppJid) {
+    // Auto-derive from WhatsApp JID (e.g., "123456789@s.whatsapp.net" -> "wa-send-123456789")
+    const jidNum = currentWhatsAppJid.split('@')[0]
+    return `${WA_QUEUE_NAME_BASE}-${jidNum}`
+  }
+  // Fallback during startup
+  return WA_QUEUE_NAME_BASE
+}
 
 function parseWaVersionOverride(raw = '') {
   const s = String(raw || '').trim()
@@ -2064,22 +2093,42 @@ const redis = new IORedis(REDIS_URL, {
   enableReadyCheck: true,
 })
 
-const sendQueue = new Queue(WA_QUEUE_NAME, {
-  connection: redis,
-  defaultJobOptions: {
-    removeOnComplete: 2000,
-    removeOnFail: 5000,
-    attempts: (MAX_RETRIES_DEFAULT ?? 3) + 1, // include first attempt
-    backoff: { type: 'exponential', delay: RETRY_BACKOFF_MS_DEFAULT ?? 1500 },
-  },
-})
+// Queue objects will be created lazily once we know the instance ID
+let sendQueue = null
+let queueEvents = null
 
-// QueueEvents must use its own Redis connection
-const queueEventsConn = redis.duplicate()
-const queueEvents = new QueueEvents(WA_QUEUE_NAME, { connection: queueEventsConn })
+// Initialize or re-initialize queue with the correct queue name
+function initializeQueue(queueName) {
+  if (sendQueue) {
+    console.log(`📦 Closing previous queue: ${sendQueue.name}`)
+    sendQueue.close().catch(() => {})
+  }
+  if (queueEvents) {
+    queueEvents.close().catch(() => {})
+  }
 
-queueEvents.on('completed', ({ jobId }) => console.log('✅ job completed', jobId))
-queueEvents.on('failed', ({ jobId, failedReason }) => console.log('❌ job failed', jobId, failedReason))
+  sendQueue = new Queue(queueName, {
+    connection: redis,
+    defaultJobOptions: {
+      removeOnComplete: 2000,
+      removeOnFail: 5000,
+      attempts: (MAX_RETRIES_DEFAULT ?? 3) + 1, // include first attempt
+      backoff: { type: 'exponential', delay: RETRY_BACKOFF_MS_DEFAULT ?? 1500 },
+    },
+  })
+
+  // QueueEvents must use its own Redis connection
+  const queueEventsConn = redis.duplicate()
+  queueEvents = new QueueEvents(queueName, { connection: queueEventsConn })
+
+  queueEvents.on('completed', ({ jobId }) => console.log('✅ job completed', jobId))
+  queueEvents.on('failed', ({ jobId, failedReason }) => console.log('❌ job failed', jobId, failedReason))
+
+  console.log(`📦 Queue initialized: ${queueName}`)
+}
+
+// Initialize with default queue name (will be re-initialized once socket connects)
+initializeQueue(getWaQueueName())
 
 if (!MEDIA_SIGNING_SECRET) {
   console.warn('⚠️ MEDIA_SIGNING_SECRET not set. Signed media links will NOT work securely.')
@@ -3222,6 +3271,8 @@ function upsertContact(store, contact, opts = {}) {
   const incomingMsisdnCanonical = canonicalMsisdn(normalized.msisdn || '') || msisdnFromJid(incomingJid)
 
   let idx = -1
+  // CRITICAL: Match by identity (JID/MSISDN) first. Never merge different identities just because they have the same name.
+  // This prevents "Pieter" with JID A from merging with "Pieter" with JID B.
   if (incomingJid || incomingMsisdnCanonical) {
     idx = (store.contacts || []).findIndex(c => {
       const cJid = normalizeJid(c?.jid)
@@ -3231,7 +3282,8 @@ function upsertContact(store, contact, opts = {}) {
       return false
     })
   }
-  if (idx < 0) idx = store.contacts.findIndex(c => norm(c.name) === key)
+  // DO NOT fall back to name-based matching. Multiple different JIDs can have the same name.
+  // Name-based deduplication happens only during normalizeContactsStore() with proper LID↔phone logic.
 
   if (idx >= 0) {
     const prev = store.contacts[idx] || {}
@@ -4215,6 +4267,9 @@ let startWhatsAppInProgress = false
 let walHandshakeInProgress = false  // true between makeWASocket() and first open/close event — suppresses DB key writes
 let preferLatestWaVersion = false   // auto-enabled after repeated 405 failures
 let waVersionFallbackIndex = -1     // -1 = try auto-fetch; >=0 = cycle through WA_KNOWN_VERSIONS
+let groupRefreshTimer = null
+let groupRefreshInFlight = null
+let lastGroupRefreshAttemptAt = 0
 
 async function clearAuthStorage() {
   await clearAuthFromDb().catch((e) => { console.warn('⚠️ Failed to clear auth from DB:', e?.message) })
@@ -4257,26 +4312,107 @@ async function triggerRelink(reason = 'manual', options = {}) {
 }
 
 async function refreshGroups() {
-  if (!sock) throw new Error('WhatsApp socket not ready')
-  const groups = await sock.groupFetchAllParticipating()
+  if (groupRefreshInFlight) return groupRefreshInFlight
 
-  const byJid = new Map()
-  const byName = new Map()
+  groupRefreshInFlight = (async () => {
+    if (!sock) throw new Error('WhatsApp socket not ready')
+    lastGroupRefreshAttemptAt = Date.now()
 
-  for (const g of Object.values(groups)) {
-    const jid = g.id
-    const subject = (g.subject || '').trim()
-    const key = norm(subject)
-    const item = { jid, subject }
+    const groups = await sock.groupFetchAllParticipating()
 
-    byJid.set(jid, item)
-    if (!byName.has(key)) byName.set(key, [])
-    byName.get(key).push(item)
+    const byJid = new Map()
+    const byName = new Map()
+
+    for (const g of Object.values(groups)) {
+      const jid = normalizeJid(g.id)
+      if (!jid) continue
+
+      const subject = (g.subject || '').trim()
+      const key = norm(subject)
+      const item = { jid, subject }
+
+      byJid.set(jid, item)
+      if (!byName.has(key)) byName.set(key, [])
+      byName.get(key).push(item)
+    }
+
+    groupCache = { updatedAt: Date.now(), byJid, byName }
+
+    let newChats = 0
+    for (const group of byJid.values()) {
+      const jid = normalizeJid(group.jid)
+      if (!jid || !isGroupJid(jid)) continue
+
+      const prev = chatIndex.get(jid)
+      if (prev) {
+        if (!prev.isGroup) {
+          chatIndex.set(jid, { ...prev, chatJid: jid, isGroup: true })
+        }
+        continue
+      }
+
+      const summary = {
+        chatJid: jid,
+        isGroup: true,
+        count: 0,
+        lastTs: 0,
+        lastText: '',
+        lastSenderJid: ''
+      }
+      chatIndex.set(jid, summary)
+      newChats += 1
+      broadcastAdminMessageUpdate(jid, null, summary)
+    }
+
+    console.log(`👥 Group cache updated: ${byJid.size} groups${newChats ? ` (+${newChats} new chats)` : ''}`)
+    return { count: byJid.size, updatedAt: groupCache.updatedAt, newChats }
+  })()
+
+  try {
+    return await groupRefreshInFlight
+  } finally {
+    groupRefreshInFlight = null
   }
+}
 
-  groupCache = { updatedAt: Date.now(), byJid, byName }
-  console.log(`👥 Group cache updated: ${byJid.size} groups`)
-  return { count: byJid.size, updatedAt: groupCache.updatedAt }
+function scheduleGroupRefresh(reason = 'event', options = {}) {
+  if (!sock || connectionStatus !== 'open') return
+
+  const delayMs = Math.max(0, Number(options?.delayMs ?? GROUP_CACHE_REFRESH_DEBOUNCE_MS))
+  const force = Boolean(options?.force)
+  const now = Date.now()
+  const minGapDelay = force ? 0 : Math.max(0, GROUP_CACHE_REFRESH_MIN_GAP_MS - Math.max(0, now - lastGroupRefreshAttemptAt))
+  const waitMs = Math.max(delayMs, minGapDelay)
+
+  if (groupRefreshTimer) clearTimeout(groupRefreshTimer)
+  groupRefreshTimer = setTimeout(() => {
+    groupRefreshTimer = null
+    refreshGroups().catch((e) => {
+      console.warn(`⚠️ Group cache refresh failed (${reason}):`, e?.message)
+    })
+  }, waitMs)
+}
+
+function ownParticipantJids() {
+  const values = new Set()
+  const candidates = [sock?.user?.id, currentWhatsAppJid]
+  for (const raw of candidates) {
+    const jid = normalizeJid(raw)
+    if (!jid) continue
+    values.add(jid)
+    values.add(jid.replace('@s.whatsapp.net', '@w.whatsapp.net'))
+  }
+  return values
+}
+
+function participantsIncludeSelf(participants = []) {
+  const mine = ownParticipantJids()
+  if (!mine.size) return false
+  for (const raw of participants || []) {
+    const jid = normalizeJid(raw)
+    if (jid && mine.has(jid)) return true
+  }
+  return false
 }
 
 function findGroupCachedByName(groupName) {
@@ -5259,6 +5395,26 @@ async function startWhatsApp() {
       lastQRPngBufferVersion = 0
       qrPngBuildPromise = null
       lastQRDataUrl = ''
+      
+      // MULTI-INSTANCE ISOLATION: Update instance ID from WhatsApp JID
+      const waJid = normalizeJid(sock?.user?.id || '')
+      if (waJid && !INSTANCE_ID_OVERRIDE) {
+        const newInstanceId = waJid.split('@')[0]
+        if (newInstanceId && newInstanceId !== currentInstanceId) {
+          currentInstanceId = newInstanceId
+          currentWhatsAppJid = waJid
+          const queueName = getWaQueueName()
+          console.log(`🔐 Instance isolation: WhatsApp JID=${waJid}, instanceId=${currentInstanceId}, queue=${queueName}`)
+          
+          // Reinitialize queue and worker with the correct instance-specific names
+          initializeQueue(queueName)
+          initializeWorker(queueName)
+        }
+      } else if (waJid) {
+        currentWhatsAppJid = waJid
+        console.log(`🔐 Instance isolation: Using explicit INSTANCE_ID=${currentInstanceId}, WhatsApp JID=${waJid}`)
+      }
+      
       console.log('✅ WhatsApp connected')
       logDiag('info', 'wa.connect.open', '✅ WhatsApp connected', { reconnectAttemptCount })
       try { await refreshGroups() } catch (e) { console.warn('⚠️ Group cache refresh failed:', e?.message) }
@@ -5393,6 +5549,70 @@ async function startWhatsApp() {
     }
   })
 
+  sock.ev.on('groups.upsert', (items = []) => {
+    try {
+      if ((items || []).some(g => isGroupJid(normalizeJid(g?.id || g?.jid)))) {
+        scheduleGroupRefresh('groups.upsert', { delayMs: 500 })
+      }
+    } catch (e) {
+      console.warn('⚠️ groups.upsert handling failed:', e?.message)
+    }
+  })
+
+  sock.ev.on('groups.update', (items = []) => {
+    try {
+      if ((items || []).some(g => isGroupJid(normalizeJid(g?.id || g?.jid)))) {
+        scheduleGroupRefresh('groups.update')
+      }
+    } catch (e) {
+      console.warn('⚠️ groups.update handling failed:', e?.message)
+    }
+  })
+
+  sock.ev.on('group-participants.update', (update = {}) => {
+    try {
+      const groupJid = normalizeJid(update?.id)
+      if (!isGroupJid(groupJid)) return
+
+      const action = String(update?.action || '').trim().toLowerCase()
+      const participants = Array.isArray(update?.participants) ? update.participants : []
+      const touchesSelf = participantsIncludeSelf(participants)
+      const delayMs = touchesSelf ? 250 : GROUP_CACHE_REFRESH_DEBOUNCE_MS
+
+      if (touchesSelf || action === 'add' || action === 'remove' || !groupCache.byJid.has(groupJid)) {
+        scheduleGroupRefresh(`group-participants.update:${action || 'unknown'}`, { delayMs, force: touchesSelf })
+      }
+    } catch (e) {
+      console.warn('⚠️ group-participants.update handling failed:', e?.message)
+    }
+  })
+
+  sock.ev.on('chats.upsert', (items = []) => {
+    try {
+      if ((items || []).some(chat => {
+        const jid = normalizeJid(chat?.id || chat?.jid)
+        return isGroupJid(jid) && !groupCache.byJid.has(jid)
+      })) {
+        scheduleGroupRefresh('chats.upsert', { delayMs: 500 })
+      }
+    } catch (e) {
+      console.warn('⚠️ chats.upsert handling failed:', e?.message)
+    }
+  })
+
+  sock.ev.on('chats.update', (items = []) => {
+    try {
+      if ((items || []).some(chat => {
+        const jid = normalizeJid(chat?.id || chat?.jid)
+        return isGroupJid(jid) && !groupCache.byJid.has(jid)
+      })) {
+        scheduleGroupRefresh('chats.update')
+      }
+    } catch (e) {
+      console.warn('⚠️ chats.update handling failed:', e?.message)
+    }
+  })
+
   // Initial MD history sync after fresh login/pair.
   // This populates contacts/chats/messages even before any new inbound event arrives.
   sock.ev.on('messaging-history.set', async (payload = {}) => {
@@ -5520,6 +5740,10 @@ async function startWhatsApp() {
       const rawChatJid = msg.key.remoteJid
       const group = isGroupJid(rawChatJid)
       const chatJid = group ? normalizeJid(rawChatJid) : resolvePreferredChatJid(rawChatJid)
+
+      if (group && chatJid && !groupCache.byJid.has(chatJid)) {
+        scheduleGroupRefresh('messages.upsert:new-group', { delayMs: 250 })
+      }
 
       // ignore outgoing events here (we store outbound ourselves)
       if (msg.key.fromMe) continue
@@ -5672,9 +5896,11 @@ async function startWhatsApp() {
 
         if (!matchesAutoReply(textToMatch)) continue
 
-        const last = lastAutoReplyAt.get(chatJid) || 0
+        // Use instance-isolated key for cooldown tracking: "instanceId:chatJid"
+        const cooldownKey = `${currentInstanceId}:${chatJid}`
+        const last = lastAutoReplyAt.get(cooldownKey) || 0
         if (Date.now() - last < autoReplyCfg.cooldownMs) continue
-        lastAutoReplyAt.set(chatJid, Date.now())
+        lastAutoReplyAt.set(cooldownKey, Date.now())
 
         await queueAutoReplyMessage(chatJid, group, autoReplyCfg.text, 'auto', msgId)
       }
@@ -5789,62 +6015,74 @@ async function globalGate() {
   lastGlobalSendAt = Date.now()
 }
 
-const worker = new Worker(
-  WA_QUEUE_NAME,
-  async (bullJob) => {
-    const job = bullJob.data
+// Worker will be initialized lazily once queue is set up
+let worker = null
 
-    // Wait for WhatsApp connection (durable jobs should not fail just because WS is reconnecting)
-    while (connectionStatus !== 'open' || !sock) {
-      await sleep(1000)
-    }
+function initializeWorker(queueName) {
+  if (worker) {
+    console.log('🔲 Closing previous worker...')
+    worker.close().catch(() => {})
+  }
 
-    // Durable per recipient pacing
-    await redisPerJidGate(job.jid)
+  worker = new Worker(
+    queueName,
+    async (bullJob) => {
+      const job = bullJob.data
 
-    // Optional global gate + your existing base/jitter delay
-    await globalGate()
+      // Wait for WhatsApp connection (durable jobs should not fail just because WS is reconnecting)
+      while (connectionStatus !== 'open' || !sock) {
+        await sleep(1000)
+      }
 
-    try {
-      const quoted = job.quotedMessageId ? getQuotedMessage(job.quotedMessageId) : null
-      const sendResult = await sock.sendMessage(job.jid, job.payload, quoted ? { quoted } : undefined)
-      const waMsgId = String(sendResult?.key?.id || '').trim()
+      // Durable per recipient pacing
+      await redisPerJidGate(job.jid)
 
-      if (job.msgId) {
-        if (waMsgId) {
-          const linked = linkMessageWaId(job.msgId, waMsgId)
-          if (linked) upsertRecentMessage(linked)
+      // Optional global gate + your existing base/jitter delay
+      await globalGate()
+
+      try {
+        const quoted = job.quotedMessageId ? getQuotedMessage(job.quotedMessageId) : null
+        const sendResult = await sock.sendMessage(job.jid, job.payload, quoted ? { quoted } : undefined)
+        const waMsgId = String(sendResult?.key?.id || '').trim()
+
+        if (job.msgId) {
+          if (waMsgId) {
+            const linked = linkMessageWaId(job.msgId, waMsgId)
+            if (linked) upsertRecentMessage(linked)
+          }
+          const updated = updateMessageStatus(job.msgId, { status: 'sent' })
+          if (updated) upsertRecentMessage(updated)
         }
-        const updated = updateMessageStatus(job.msgId, { status: 'sent' })
-        if (updated) upsertRecentMessage(updated)
+
+        // Natural pacing between sends
+        await sleep(calcDelay())
+
+        return { ok: true }
+      } catch (err) {
+        const msg = err?.message || String(err)
+
+        if (job.msgId) {
+          // Mark as failed only when job is truly out of attempts.
+          // BullMQ will retry automatically — so mark "retrying" until final failure.
+          const isLastAttempt = bullJob.attemptsMade + 1 >= bullJob.opts.attempts
+          const nextStatus = isLastAttempt ? 'failed' : 'retrying'
+          const updated = updateMessageStatus(job.msgId, { status: nextStatus })
+          if (updated) upsertRecentMessage(updated)
+
+        }
+
+        throw err
       }
+    },
+    { connection: redis, concurrency: 1 }
+  )
 
-      // Natural pacing between sends
-      await sleep(calcDelay())
+  worker.on('failed', (job, err) => {
+    console.warn('❌ Queue job failed:', job?.id, err?.message || err)
+  })
 
-      return { ok: true }
-    } catch (err) {
-      const msg = err?.message || String(err)
-
-      if (job.msgId) {
-        // Mark as failed only when job is truly out of attempts.
-        // BullMQ will retry automatically — so mark "retrying" until final failure.
-        const isLastAttempt = bullJob.attemptsMade + 1 >= bullJob.opts.attempts
-        const nextStatus = isLastAttempt ? 'failed' : 'retrying'
-        const updated = updateMessageStatus(job.msgId, { status: nextStatus })
-        if (updated) upsertRecentMessage(updated)
-
-      }
-
-      throw err
-    }
-  },
-  { connection: redis, concurrency: 1 }
-)
-
-worker.on('failed', (job, err) => {
-  console.warn('❌ Queue job failed:', job?.id, err?.message || err)
-})
+  console.log(`🔲 Worker initialized for queue: ${queueName}`)
+}
 
 
 const recentIndexById = new Map() // msgId -> index in recentMessages
@@ -6276,7 +6514,7 @@ app.get('/health', async (req, res) => {
     wa: { status: connectionStatus, hasQR: Boolean(lastQR) },
     dependencies: deps,
     groupCache: { updatedAt: groupCache.updatedAt, count: groupCache.byJid.size },
-    queue: { name: WA_QUEUE_NAME, ...counts },
+    queue: { name: getWaQueueName(), ...counts },
     autoReply: { enabled: autoReply.enabled, scope: autoReply.scope },
     rateLimit: { windowMs: rateCfg.windowMs, max: rateCfg.max },
     api: {
@@ -6968,7 +7206,7 @@ app.get('/admin/connection', adminKeyMiddleware, async (req, res) => {
     wa: { status: connectionStatus, hasQR: Boolean(lastQR) },
     dependencies,
     groupCache: { updatedAt: groupCache.updatedAt, count: groupCache.byJid.size },
-    queue: { name: WA_QUEUE_NAME, ...counts, quietHours: queueCfg.quietHours },
+    queue: { name: getWaQueueName(), ...counts, quietHours: queueCfg.quietHours },
     schedules: { total: schedules.schedules.length, ...scheduleCounts },
     n8n: { deadLetters: Array.isArray(deadLetters.items) ? deadLetters.items.length : 0 },
     delivery
@@ -8386,11 +8624,17 @@ function cleanupOldUploads() {
 setInterval(cleanupOldUploads, MEDIA_CLEANUP_EVERY_HOURS * 60 * 60 * 1000);
 cleanupOldUploads();
 
+const groupCacheSyncTimer = setInterval(() => {
+  if (!sock || connectionStatus !== 'open') return
+  scheduleGroupRefresh('interval', { delayMs: 0 })
+}, GROUP_CACHE_SYNC_INTERVAL_MS)
+
 const scheduleTimer = setInterval(() => {
   processDueSchedules().catch(() => {})
 }, Math.max(1000, SCHEDULE_POLL_MS))
 
 async function shutdown() {
+  try { clearInterval(groupCacheSyncTimer) } catch {}
   try { clearInterval(scheduleTimer) } catch {}
   try { await worker?.close() } catch {}
   try { await sendQueue?.close() } catch {}

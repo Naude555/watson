@@ -2857,6 +2857,78 @@ function updateRuleMatchDisplay() {
   box.style.display = match === 'any' ? 'none' : 'block';
 }
 
+function getRuleCooldownMsFromForm() {
+  const preset = String(document.getElementById('ruleCooldownPreset')?.value || '30000').trim();
+  if (preset === 'custom') {
+    return Math.max(0, Number(document.getElementById('ruleCooldownMs')?.value || 0) || 0);
+  }
+  return Math.max(0, Number(preset || 0) || 0);
+}
+
+function setRuleCooldownFormValue(msRaw) {
+  const presetEl = document.getElementById('ruleCooldownPreset');
+  const customBox = document.getElementById('ruleCooldownCustomBox');
+  const customInput = document.getElementById('ruleCooldownMs');
+  if (!presetEl || !customBox || !customInput) return;
+
+  const ms = Math.max(0, Number(msRaw || 0) || 0);
+  const hasPreset = Array.from(presetEl.options || []).some(o => String(o.value) === String(ms));
+
+  if (hasPreset) {
+    presetEl.value = String(ms);
+    customInput.value = String(ms);
+    customBox.style.display = 'none';
+    return;
+  }
+
+  presetEl.value = 'custom';
+  customInput.value = String(ms);
+  customBox.style.display = 'block';
+}
+
+function onRuleCooldownPresetChange() {
+  const preset = String(document.getElementById('ruleCooldownPreset')?.value || '30000').trim();
+  const customBox = document.getElementById('ruleCooldownCustomBox');
+  const customInput = document.getElementById('ruleCooldownMs');
+  if (!customBox || !customInput) return;
+
+  if (preset === 'custom') {
+    customBox.style.display = 'block';
+    return;
+  }
+
+  customBox.style.display = 'none';
+  customInput.value = String(Math.max(0, Number(preset || 0) || 0));
+}
+
+function onRuleCooldownInputChange() {
+  const presetEl = document.getElementById('ruleCooldownPreset');
+  if (!presetEl) return;
+  presetEl.value = 'custom';
+}
+
+function formatRuleCooldown(msRaw) {
+  const ms = Math.max(0, Number(msRaw || 0) || 0);
+  if (!ms) return 'No cooldown';
+  if (ms % 86400000 === 0) {
+    const d = ms / 86400000;
+    return `${d} day${d === 1 ? '' : 's'}`;
+  }
+  if (ms % 3600000 === 0) {
+    const h = ms / 3600000;
+    return `${h} hour${h === 1 ? '' : 's'}`;
+  }
+  if (ms % 60000 === 0) {
+    const m = ms / 60000;
+    return `${m} minute${m === 1 ? '' : 's'}`;
+  }
+  if (ms % 1000 === 0) {
+    const s = ms / 1000;
+    return `${s} second${s === 1 ? '' : 's'}`;
+  }
+  return `${ms} ms`;
+}
+
 function updateRuleDmFilterDisplay() {
   const mode = String(document.getElementById('ruleDmFilterMode')?.value || 'all');
   const box = document.getElementById('ruleDmFilterBox');
@@ -3018,6 +3090,7 @@ function resetRuleForm() {
   document.getElementById('ruleMatch').value = 'contains';
   document.getElementById('ruleKeyword').value = '';
   document.getElementById('ruleReply').value = '';
+  setRuleCooldownFormValue(30000);
   document.getElementById('ruleFormMode').textContent = 'Creating a new rule';
   updateRuleDmFilterDisplay();
   updateRuleMatchDisplay();
@@ -3037,6 +3110,7 @@ function editRule(id) {
   document.getElementById('ruleMatch').value = rule.matchType || 'contains';
   document.getElementById('ruleKeyword').value = rule.matchValue || '';
   document.getElementById('ruleReply').value = rule.replyText || '';
+  setRuleCooldownFormValue(rule.cooldownMs ?? 30000);
   document.getElementById('ruleFormMode').textContent = `Editing rule: ${rule.name || rule.id}`;
   updateRuleDmFilterDisplay();
   updateRuleMatchDisplay();
@@ -3066,9 +3140,10 @@ function renderRulesList() {
     const dmSummary = dmMode === 'include'
       ? `DM include: ${dmLabels.length ? dmLabels.join(', ') : '(none)'}`
       : (dmMode === 'exclude' ? `DM exclude: ${dmLabels.length ? dmLabels.join(', ') : '(none)'}` : 'DM all');
+    const cooldownSummary = `Cooldown: ${formatRuleCooldown(r.cooldownMs)}`;
     const item = document.createElement('div');
     item.className = 'list-item';
-    item.innerHTML = `<div class="list-item-text"><div class="list-item-main">${r.triggerType}: "${esc(r.matchValue || 'any')}"</div><div class="list-item-sub">${esc(dmSummary)} • → ${esc(r.replyText.slice(0, 50))}</div></div>`;
+    item.innerHTML = `<div class="list-item-text"><div class="list-item-main">${r.triggerType}: "${esc(r.matchValue || 'any')}"</div><div class="list-item-sub">${esc(dmSummary)} • ${esc(cooldownSummary)} • → ${esc(r.replyText.slice(0, 50))}</div></div>`;
     
     const del = document.createElement('button');
     del.className = 'btn-danger';
@@ -3094,6 +3169,7 @@ async function saveRule() {
   const match = document.getElementById('ruleMatch').value;
   const keyword = document.getElementById('ruleKeyword').value.trim();
   const reply = document.getElementById('ruleReply').value.trim();
+  const cooldownMs = getRuleCooldownMsFromForm();
   const id = document.getElementById('ruleId').value.trim();
   const enabled = document.getElementById('ruleEnabled').value !== 'false';
   
@@ -3114,6 +3190,7 @@ async function saveRule() {
         scope,
         dmFilterMode,
         dmFilterValues,
+        cooldownMs,
         enabled,
         replyText: reply
       })
