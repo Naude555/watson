@@ -232,18 +232,26 @@ const WA_WEB_VERSION_OVERRIDE = String(process.env.WA_WEB_VERSION_OVERRIDE || ''
 
 // Get the effective queue name for this instance
 // This ensures each WhatsApp number gets its own queue, preventing crosstalk
+function normalizeQueueSegment(raw = '') {
+  const s = String(raw || '').trim()
+  if (!s) return 'default'
+  // BullMQ queue names cannot contain ':' and are safer with conservative chars only.
+  return s.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/-+/g, '-').replace(/^[-.]+|[-.]+$/g, '') || 'default'
+}
+
 function getWaQueueName() {
+  const base = normalizeQueueSegment(WA_QUEUE_NAME_BASE)
   if (INSTANCE_ID_OVERRIDE) {
     // If explicitly set, use it
-    return `${WA_QUEUE_NAME_BASE}-${INSTANCE_ID_OVERRIDE}`
+    return `${base}-${normalizeQueueSegment(INSTANCE_ID_OVERRIDE)}`
   }
   if (currentWhatsAppJid) {
     // Auto-derive from WhatsApp JID (e.g., "123456789@s.whatsapp.net" -> "wa-send-123456789")
     const jidNum = currentWhatsAppJid.split('@')[0]
-    return `${WA_QUEUE_NAME_BASE}-${jidNum}`
+    return `${base}-${normalizeQueueSegment(jidNum)}`
   }
   // Fallback during startup
-  return WA_QUEUE_NAME_BASE
+  return base
 }
 
 function parseWaVersionOverride(raw = '') {
@@ -4322,18 +4330,34 @@ async function refreshGroups() {
 
     const byJid = new Map()
     const byName = new Map()
+    const prevByJid = groupCache?.byJid instanceof Map ? groupCache.byJid : new Map()
 
-    for (const g of Object.values(groups)) {
-      const jid = normalizeJid(g.id)
+    for (const [rawKey, gRaw] of Object.entries(groups || {})) {
+      const g = gRaw || {}
+      const jid = normalizeJid(g.id || g.jid || rawKey)
       if (!jid) continue
 
-      const subject = (g.subject || '').trim()
+      const prev = prevByJid.get(jid)
+      const subject = String(
+        g.subject ||
+        g.subjectName ||
+        g.name ||
+        prev?.subject ||
+        ''
+      ).trim()
       const key = norm(subject)
       const item = { jid, subject }
 
       byJid.set(jid, item)
-      if (!byName.has(key)) byName.set(key, [])
-      byName.get(key).push(item)
+      if (key) {
+        if (!byName.has(key)) byName.set(key, [])
+        byName.get(key).push(item)
+      }
+    }
+
+    if (byJid.size === 0 && prevByJid.size > 0) {
+      console.warn('⚠️ Group refresh returned 0 groups; keeping previous group cache to avoid name loss')
+      return { count: prevByJid.size, updatedAt: groupCache.updatedAt, newChats: 0, stale: true }
     }
 
     groupCache = { updatedAt: Date.now(), byJid, byName }
@@ -6329,7 +6353,21 @@ async function processDueSchedules() {
  */
 const app = express()
 app.disable('x-powered-by')
-app.set('trust proxy', true)
+
+function parseTrustProxySetting(raw = '') {
+  const s = String(raw || '').trim().toLowerCase()
+  if (!s) return 1
+  if (s === 'false' || s === '0' || s === 'off' || s === 'no') return false
+  // Avoid permissive boolean true with express-rate-limit; treat it as one trusted hop.
+  if (s === 'true' || s === '1' || s === 'on' || s === 'yes') return 1
+  const n = Number(s)
+  if (Number.isInteger(n) && n >= 0) return n
+  // Also supports subnet names / CSV values accepted by Express, e.g. "loopback, linklocal, uniquelocal"
+  return raw
+}
+
+const TRUST_PROXY = parseTrustProxySetting(process.env.TRUST_PROXY || process.env.EXPRESS_TRUST_PROXY || '1')
+app.set('trust proxy', TRUST_PROXY)
 
 function normalizeForwardedPrefix(raw = '') {
   const s = String(raw || '').trim()
@@ -6377,7 +6415,8 @@ function rebuildRateLimiter() {
     windowMs: cfg.windowMs,
     max: cfg.max,
     standardHeaders: true,
-    legacyHeaders: false
+    legacyHeaders: false,
+    keyGenerator: (req) => clientIp(req) || String(req.ip || '') || 'unknown'
   })
   return cfg
 }
