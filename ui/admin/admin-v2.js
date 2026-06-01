@@ -199,6 +199,7 @@ function showPanel(name, btnEl) {
   document.getElementById('panelContacts').classList.toggle('active', name === 'contacts');
   document.getElementById('panelGroups').classList.toggle('active', name === 'groups');
   document.getElementById('panelRules').classList.toggle('active', name === 'rules');
+  document.getElementById('panelWebhooks').classList.toggle('active', name === 'webhooks');
   document.getElementById('panelTemplates').classList.toggle('active', name === 'templates');
   document.getElementById('panelSchedule').classList.toggle('active', name === 'schedule');
   document.getElementById('panelOps').classList.toggle('active', name === 'ops');
@@ -214,6 +215,7 @@ function showPanel(name, btnEl) {
     contacts: 'Contacts',
     groups: 'Groups',
     rules: 'Rules',
+    webhooks: 'Webhooks',
     templates: 'Templates',
     schedule: 'Schedule',
     ops: 'Operations'
@@ -240,6 +242,10 @@ function showPanel(name, btnEl) {
   if (name === 'rules') {
     loadContacts().catch(() => {});
     loadRules();
+  }
+  if (name === 'webhooks') {
+    loadContacts().catch(() => {});
+    loadWebhookRules();
   }
   if (name === 'templates') loadTemplates();
   if (name === 'schedule') loadSchedules();
@@ -3666,6 +3672,22 @@ function readWebhookUrlsFromUi() {
   return out;
 }
 
+function parseAutomationKeywords(raw = '') {
+  return [...new Set(
+    String(raw || '')
+      .split(/[\n,;]+/g)
+      .map(v => String(v || '').trim())
+      .filter(Boolean)
+  )];
+}
+
+function formatAutomationKeywords(values = []) {
+  return (Array.isArray(values) ? values : [])
+    .map(v => String(v || '').trim())
+    .filter(Boolean)
+    .join('\n');
+}
+
 async function loadAutomationSettings(silent = false) {
   try {
     const data = await api('/admin/automations');
@@ -3676,6 +3698,9 @@ async function loadAutomationSettings(silent = false) {
 
     const defaults = automationSettings.defaults || {};
     const forward = automationSettings.forward || {};
+    const triggers = automationSettings.triggers || {};
+    const inboundTrigger = triggers.inbound || {};
+    const outboundTrigger = triggers.outbound || {};
     const safety = defaults.safety || {};
     const rateLimit = defaults.rateLimit || {};
     const urls = Array.isArray(automationSettings.webhookUrls) && automationSettings.webhookUrls.length
@@ -3698,6 +3723,12 @@ async function loadAutomationSettings(silent = false) {
     document.getElementById('opsN8nAllowGroups').checked = safety.allowGroups !== false;
     document.getElementById('opsN8nAllowDM').checked = safety.allowDM !== false;
     document.getElementById('opsN8nBlockMedia').checked = Boolean(safety.blockMedia);
+    document.getElementById('opsN8nInboundTriggerEnabled').checked = Boolean(inboundTrigger.enabled);
+    document.getElementById('opsN8nInboundMatchType').value = inboundTrigger.matchType || 'contains';
+    document.getElementById('opsN8nInboundKeywords').value = formatAutomationKeywords(inboundTrigger.keywords || []);
+    document.getElementById('opsN8nOutboundTriggerEnabled').checked = Boolean(outboundTrigger.enabled);
+    document.getElementById('opsN8nOutboundMatchType').value = outboundTrigger.matchType || 'contains';
+    document.getElementById('opsN8nOutboundKeywords').value = formatAutomationKeywords(outboundTrigger.keywords || []);
     const metaEl = document.getElementById('opsN8nMeta');
     if (metaEl) metaEl.textContent = formatSettingsMeta(automationSettings.lastSavedBy, automationSettings.updatedAt);
     return automationSettings;
@@ -3721,6 +3752,21 @@ async function saveAutomationSettings() {
         image: Boolean(document.getElementById('opsN8nForwardImage')?.checked),
         document: Boolean(document.getElementById('opsN8nForwardDocument')?.checked),
         other: Boolean(document.getElementById('opsN8nForwardOther')?.checked)
+      },
+      triggers: {
+        ...(automationSettings.triggers || {}),
+        inbound: {
+          ...(automationSettings.triggers?.inbound || {}),
+          enabled: Boolean(document.getElementById('opsN8nInboundTriggerEnabled')?.checked),
+          matchType: document.getElementById('opsN8nInboundMatchType')?.value || 'contains',
+          keywords: parseAutomationKeywords(document.getElementById('opsN8nInboundKeywords')?.value || '')
+        },
+        outbound: {
+          ...(automationSettings.triggers?.outbound || {}),
+          enabled: Boolean(document.getElementById('opsN8nOutboundTriggerEnabled')?.checked),
+          matchType: document.getElementById('opsN8nOutboundMatchType')?.value || 'contains',
+          keywords: parseAutomationKeywords(document.getElementById('opsN8nOutboundKeywords')?.value || '')
+        }
       },
       defaults: {
         ...(automationSettings.defaults || {}),
@@ -3969,3 +4015,238 @@ async function init() {
 
 updateSendForm();
 init();
+
+// ─── Webhook Rules ────────────────────────────────────────────────────────────
+
+let webhookRulesData = [];
+let editingWebhookRuleId = null;
+let webhookDmFilterManualValues = [];
+
+function resetWebhookRuleForm() {
+  editingWebhookRuleId = null;
+  document.getElementById('webhookId').value = '';
+  document.getElementById('webhookEnabled').value = 'true';
+  document.getElementById('webhookName').value = '';
+  document.getElementById('webhookUrl').value = '';
+  document.getElementById('webhookSharedSecret').value = '';
+  document.getElementById('webhookDirection').value = 'both';
+  document.getElementById('webhookScope').value = 'both';
+  document.getElementById('webhookDmFilterMode').value = 'all';
+  document.getElementById('webhookDmFilterSearch').value = '';
+  setWebhookDmFilterManualValues([]);
+  document.getElementById('webhookMatch').value = 'any';
+  document.getElementById('webhookKeyword').value = '';
+  document.getElementById('webhookFormMode').textContent = 'Creating a new webhook rule';
+  updateWebhookDmFilterDisplay();
+  updateWebhookMatchDisplay();
+}
+
+function updateWebhookMatchDisplay() {
+  const val = document.getElementById('webhookMatch').value;
+  document.getElementById('webhookKeywordBox').style.display = val === 'any' ? 'none' : '';
+}
+
+function updateWebhookDmFilterDisplay() {
+  const val = document.getElementById('webhookDmFilterMode').value;
+  document.getElementById('webhookDmFilterBox').style.display = val === 'all' ? 'none' : '';
+  if (val !== 'all') syncWebhookDmFilterPicker();
+}
+
+// --- DM filter chip helpers (mirrors rule DM filter) ---
+
+function setWebhookDmFilterManualValues(values) {
+  webhookDmFilterManualValues = [...values];
+  renderWebhookDmFilterChips();
+}
+
+function renderWebhookDmFilterChips() {
+  const box = document.getElementById('webhookDmFilterChips');
+  if (!box) return;
+  box.innerHTML = '';
+  for (const val of webhookDmFilterManualValues) {
+    const chip = document.createElement('span');
+    chip.className = 'recipient-chip';
+    chip.dataset.value = val;
+    chip.innerHTML = `${esc(contactLabelForValue(val))} <span class="chip-remove" onclick="removeWebhookDmFilterSender('${esc(val)}')">×</span>`;
+    box.appendChild(chip);
+  }
+}
+
+function addWebhookDmFilterSender(label, value) {
+  if (!value || webhookDmFilterManualValues.includes(value)) return;
+  webhookDmFilterManualValues.push(value);
+  renderWebhookDmFilterChips();
+}
+
+function removeWebhookDmFilterSender(value) {
+  webhookDmFilterManualValues = webhookDmFilterManualValues.filter(v => v !== value);
+  renderWebhookDmFilterChips();
+}
+
+function syncWebhookDmFilterPicker() {
+  const search = String(document.getElementById('webhookDmFilterSearch').value || '').toLowerCase();
+  const list = document.getElementById('webhookDmFilterPickList');
+  if (!list) return;
+  list.innerHTML = '';
+  const filtered = contacts.filter(c => {
+    const label = contactLabel(c).toLowerCase();
+    const jid = String(c.jid || '').toLowerCase();
+    const num = String(c.number || '').toLowerCase();
+    return !search || label.includes(search) || jid.includes(search) || num.includes(search);
+  });
+  for (const c of filtered.slice(0, 100)) {
+    const option = document.createElement('option');
+    option.value = c.jid || c.number || '';
+    option.textContent = contactLabel(c);
+    list.appendChild(option);
+  }
+  if (!list.options.length) {
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = 'No matching contacts';
+    option.disabled = true;
+    list.appendChild(option);
+  }
+}
+
+function addSelectedSendersToWebhookList() {
+  const list = document.getElementById('webhookDmFilterPickList');
+  if (!list) return;
+  const picked = Array.from(list.selectedOptions || [])
+    .filter(o => !o.disabled)
+    .map(o => String(o.value || '').trim())
+    .filter(Boolean);
+  if (!picked.length) { toast('Select sender(s) to add', false); return; }
+  for (const value of picked) addWebhookDmFilterSender(contactLabelForValue(value), value);
+}
+
+function addAllFilteredSendersToWebhookList() {
+  const list = document.getElementById('webhookDmFilterPickList');
+  if (!list) return;
+  const picked = Array.from(list.options || [])
+    .filter(o => !o.disabled)
+    .map(o => String(o.value || '').trim())
+    .filter(Boolean);
+  for (const value of picked) addWebhookDmFilterSender(contactLabelForValue(value), value);
+}
+
+// --- CRUD ---
+
+async function loadWebhookRules() {
+  try {
+    const data = await api('/admin/webhook-rules');
+    const cfg = data.webhookRulesConfig || {};
+    webhookRulesData = cfg.rules || [];
+    renderWebhookRulesList();
+    if (!editingWebhookRuleId) resetWebhookRuleForm();
+  } catch (e) {
+    toast(e.message, false);
+  }
+}
+
+function renderWebhookRulesList() {
+  const list = document.getElementById('webhookRulesList');
+  list.innerHTML = '';
+  if (!webhookRulesData.length) {
+    list.innerHTML = '<div style="color:#8d94a5;font-size:12px;">No webhook rules yet. Create one on the left.</div>';
+    return;
+  }
+  for (const r of webhookRulesData) {
+    const dirLabel = r.direction === 'inbound' ? '← In' : r.direction === 'outbound' ? '→ Out' : '⇄ Both';
+    const scopeLabel = r.scope === 'dm' ? 'DM' : r.scope === 'group' ? 'Group' : 'Any';
+    const matchLabel = r.matchType === 'any' ? 'any msg' : `${r.matchType}: "${r.matchValue || ''}"`;
+    const statusDot = r.enabled ? '🟢' : '🔴';
+    const shortUrl = (r.url || '').replace(/^https?:\/\//, '').slice(0, 50);
+
+    const item = document.createElement('div');
+    item.className = 'list-item';
+    item.innerHTML = `
+      <div class="list-item-text">
+        <div class="list-item-main">${statusDot} ${esc(r.name || r.id)}</div>
+        <div class="list-item-sub">${esc(dirLabel)} · ${esc(scopeLabel)} · ${esc(matchLabel)}</div>
+        <div class="list-item-sub" style="color:#6b7280;">${esc(shortUrl)}</div>
+      </div>`;
+
+    const editBtn = document.createElement('button');
+    editBtn.className = 'btn-ghost';
+    editBtn.textContent = 'Edit';
+    editBtn.onclick = () => editWebhookRule(r.id);
+
+    const delBtn = document.createElement('button');
+    delBtn.className = 'btn-danger';
+    delBtn.textContent = 'Delete';
+    delBtn.onclick = () => deleteWebhookRule(r.id);
+
+    item.appendChild(editBtn);
+    item.appendChild(delBtn);
+    list.appendChild(item);
+  }
+}
+
+function editWebhookRule(id) {
+  const rule = webhookRulesData.find(r => r.id === id);
+  if (!rule) return;
+  editingWebhookRuleId = rule.id;
+  document.getElementById('webhookId').value = rule.id || '';
+  document.getElementById('webhookEnabled').value = String(rule.enabled !== false);
+  document.getElementById('webhookName').value = rule.name || '';
+  document.getElementById('webhookUrl').value = rule.url || '';
+  document.getElementById('webhookSharedSecret').value = '';  // never pre-fill secret
+  document.getElementById('webhookDirection').value = rule.direction || 'both';
+  document.getElementById('webhookScope').value = rule.scope || 'both';
+  document.getElementById('webhookDmFilterMode').value = rule.dmFilterMode || 'all';
+  document.getElementById('webhookDmFilterSearch').value = '';
+  setWebhookDmFilterManualValues(Array.isArray(rule.dmFilterValues) ? rule.dmFilterValues : []);
+  document.getElementById('webhookMatch').value = rule.matchType || 'any';
+  document.getElementById('webhookKeyword').value = rule.matchValue || '';
+  document.getElementById('webhookFormMode').textContent = `Editing: ${rule.name || rule.id}`;
+  updateWebhookDmFilterDisplay();
+  updateWebhookMatchDisplay();
+}
+
+async function saveWebhookRule() {
+  const url = document.getElementById('webhookUrl').value.trim();
+  if (!url) { toast('Webhook URL is required', false); return; }
+
+  const id = document.getElementById('webhookId').value.trim();
+  const enabled = document.getElementById('webhookEnabled').value !== 'false';
+  const name = document.getElementById('webhookName').value.trim();
+  const sharedSecret = document.getElementById('webhookSharedSecret').value;
+  const direction = document.getElementById('webhookDirection').value;
+  const scope = document.getElementById('webhookScope').value;
+  const dmFilterMode = document.getElementById('webhookDmFilterMode').value;
+  const dmFilterValues = [...webhookDmFilterManualValues];
+  const matchType = document.getElementById('webhookMatch').value;
+  const matchValue = document.getElementById('webhookKeyword').value.trim();
+
+  const body = { id: id || undefined, name, enabled, url, direction, scope,
+    dmFilterMode, dmFilterValues, matchType, matchValue };
+
+  // Only send sharedSecret if user typed something (blank = keep existing / use global)
+  if (sharedSecret) body.sharedSecret = sharedSecret;
+
+  try {
+    await api('/admin/webhook-rules', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    toast('Webhook rule saved', true);
+    await loadWebhookRules();
+    resetWebhookRuleForm();
+  } catch (e) {
+    toast(e.message, false);
+  }
+}
+
+async function deleteWebhookRule(id) {
+  if (!confirm('Delete this webhook rule?')) return;
+  try {
+    await api(`/admin/webhook-rules/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    toast('Webhook rule deleted', true);
+    if (editingWebhookRuleId === id) resetWebhookRuleForm();
+    await loadWebhookRules();
+  } catch (e) {
+    toast(e.message, false);
+  }
+}

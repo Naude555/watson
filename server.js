@@ -280,6 +280,19 @@ function defaultAutomationsConfig() {
     lastSavedBy: 'startup-defaults',
     // global forwarding switches
     forward: { text: true, image: true, document: true, other: false },
+    // optional keyword triggers per direction
+    triggers: {
+      inbound: {
+        enabled: false,
+        matchType: 'contains', // contains | equals | regex
+        keywords: []
+      },
+      outbound: {
+        enabled: false,
+        matchType: 'contains', // contains | equals | regex
+        keywords: []
+      }
+    },
     // defaults applied to all chats unless overridden
     defaults: {
       enabled: true,
@@ -1346,6 +1359,11 @@ let automations = defaultAutomationsConfig()
 
 let responseRules = defaultRulesConfig()
 
+function defaultWebhookRulesConfig() {
+  return { enabled: true, rules: [], updatedAt: Date.now() }
+}
+let webhookRules = defaultWebhookRulesConfig()
+
 let runtimeSettings = defaultRuntimeSettings()
 let contactsStoreCache = { contacts: [], groups: [], updatedAt: Date.now() }
 let contactsStoreNeedsNormalize = true
@@ -1563,6 +1581,135 @@ function saveRulesStore() {
     writeKvToDb('rules', responseRules).catch(() => {})
   } catch (e) {
     console.warn('⚠️ Failed to save rules config:', e?.message)
+  }
+}
+
+// ─── Webhook Rules Store ────────────────────────────────────────────────────
+
+function normalizeWebhookRule(input, existing) {
+  const src = input && typeof input === 'object' ? input : {}
+  const ext = existing && typeof existing === 'object' ? existing : {}
+  const now = Date.now()
+  const id = String(src.id || ext.id || '').trim() || makeId('whr')
+
+  const direction = ['inbound', 'outbound', 'both'].includes(String(src.direction || ''))
+    ? String(src.direction)
+    : ((['inbound', 'outbound', 'both'].includes(String(ext.direction || ''))) ? String(ext.direction) : 'both')
+
+  const scope = ['both', 'dm', 'group'].includes(String(src.scope || ''))
+    ? String(src.scope)
+    : ((['both', 'dm', 'group'].includes(String(ext.scope || ''))) ? String(ext.scope) : 'both')
+
+  const matchType = ['any', 'contains', 'equals', 'regex', 'startswith'].includes(String(src.matchType || ''))
+    ? String(src.matchType)
+    : ((['any', 'contains', 'equals', 'regex', 'startswith'].includes(String(ext.matchType || ''))) ? String(ext.matchType) : 'any')
+
+  const dmFilterMode = ['all', 'include', 'exclude'].includes(String(src.dmFilterMode || ''))
+    ? String(src.dmFilterMode)
+    : ((['all', 'include', 'exclude'].includes(String(ext.dmFilterMode || ''))) ? String(ext.dmFilterMode) : 'all')
+
+  const rawDmFilterValues = src.dmFilterValues !== undefined ? src.dmFilterValues : ext.dmFilterValues
+  const dmFilterValues = (Array.isArray(rawDmFilterValues) ? rawDmFilterValues : [])
+    .map(v => String(v || '').trim()).filter(Boolean)
+
+  const name = String(src.name !== undefined ? src.name : (ext.name || '')).trim().slice(0, 200) || `Webhook ${id.slice(-6)}`
+  const url = String(src.url !== undefined ? src.url : (ext.url || '')).trim()
+  const sharedSecret = String(src.sharedSecret !== undefined ? src.sharedSecret : (ext.sharedSecret || '')).trim()
+  const matchValue = String(src.matchValue !== undefined ? src.matchValue : (ext.matchValue || '')).trim()
+  const enabled = src.enabled === undefined ? (ext.enabled === undefined ? true : Boolean(ext.enabled)) : Boolean(src.enabled)
+
+  return {
+    id,
+    name,
+    enabled,
+    url,
+    sharedSecret,
+    direction,
+    scope,
+    matchType,
+    matchValue,
+    dmFilterMode,
+    dmFilterValues,
+    createdAt: Number(ext.createdAt || src.createdAt || now),
+    updatedAt: now
+  }
+}
+
+function validateWebhookRule(rule) {
+  if (!rule.url) throw new Error('url is required')
+  return rule
+}
+
+function webhookRuleMatches(rule, rec, textForRules) {
+  if (!rule?.enabled) return false
+  if (!rule?.url) return false
+
+  // Direction filter
+  const isOutbound = rec?.direction === 'out'
+  if (rule.direction === 'inbound' && isOutbound) return false
+  if (rule.direction === 'outbound' && !isOutbound) return false
+
+  // Scope filter
+  const isGroup = Boolean(rec?.isGroup)
+  if (rule.scope === 'dm' && isGroup) return false
+  if (rule.scope === 'group' && !isGroup) return false
+
+  // DM sender filter (inbound DMs only)
+  if (!isGroup && !isOutbound && rule.dmFilterMode !== 'all') {
+    const senderJid = String(rec?.senderJid || '').trim()
+    const inList = (rule.dmFilterValues || []).some(v => String(v).trim() === senderJid)
+    if (rule.dmFilterMode === 'include' && !inList) return false
+    if (rule.dmFilterMode === 'exclude' && inList) return false
+  }
+
+  // Match type / value filter
+  if (rule.matchType !== 'any') {
+    const candidate = String(textForRules ?? rec?.text ?? '').trim()
+    const pattern = String(rule.matchValue || '').trim()
+    if (pattern) {
+      if (!candidate) return false
+      if (rule.matchType === 'equals') {
+        if (candidate.toLowerCase() !== pattern.toLowerCase()) return false
+      } else if (rule.matchType === 'contains') {
+        if (!candidate.toLowerCase().includes(pattern.toLowerCase())) return false
+      } else if (rule.matchType === 'startswith') {
+        if (!candidate.toLowerCase().startsWith(pattern.toLowerCase())) return false
+      } else if (rule.matchType === 'regex') {
+        try {
+          if (!new RegExp(pattern, 'i').test(candidate)) return false
+        } catch { return false }
+      }
+    }
+  }
+
+  return true
+}
+
+function findMatchingWebhookRules(rec, textForRules) {
+  const store = readWebhookRulesStore()
+  if (!store.enabled) return []
+  return (store.rules || []).filter(r => webhookRuleMatches(r, rec, textForRules))
+}
+
+function readWebhookRulesStore() {
+  const raw = webhookRules || defaultWebhookRulesConfig()
+  raw.enabled = Boolean(raw.enabled !== false)
+  raw.rules = Array.isArray(raw.rules) ? raw.rules : []
+  raw.updatedAt = Number(raw.updatedAt || Date.now())
+  webhookRules = raw
+  return webhookRules
+}
+
+function saveWebhookRulesStore() {
+  try {
+    webhookRules = {
+      enabled: Boolean(webhookRules?.enabled !== false),
+      rules: Array.isArray(webhookRules?.rules) ? webhookRules.rules : [],
+      updatedAt: Date.now()
+    }
+    writeKvToDb('webhook_rules', webhookRules).catch(() => {})
+  } catch (e) {
+    console.warn('⚠️ Failed to save webhook rules:', e?.message)
   }
 }
 
@@ -1942,9 +2089,75 @@ function getAutomationWebhookUrls() {
   return [...new Set(list)]
 }
 
+function normalizeAutomationKeywordTrigger(input, fallback) {
+  const base = fallback && typeof fallback === 'object' ? fallback : {}
+  const raw = input && typeof input === 'object' ? input : {}
+
+  const matchType = ['contains', 'equals', 'regex'].includes(String(raw.matchType || '').trim())
+    ? String(raw.matchType).trim()
+    : (['contains', 'equals', 'regex'].includes(String(base.matchType || '').trim()) ? String(base.matchType).trim() : 'contains')
+
+  const keywordsRaw = raw.keywords === undefined ? (base.keywords || []) : raw.keywords
+  const keywords = (Array.isArray(keywordsRaw) ? keywordsRaw : String(keywordsRaw || '').split(/[\n,;]+/g))
+    .map(v => String(v || '').trim())
+    .filter(Boolean)
+
+  return {
+    enabled: raw.enabled === undefined ? Boolean(base.enabled) : Boolean(raw.enabled),
+    matchType,
+    keywords: [...new Set(keywords)]
+  }
+}
+
+function getAutomationTriggers() {
+  const defaults = defaultAutomationsConfig().triggers
+  const raw = automations?.triggers || {}
+  return {
+    inbound: normalizeAutomationKeywordTrigger(raw.inbound, defaults.inbound),
+    outbound: normalizeAutomationKeywordTrigger(raw.outbound, defaults.outbound)
+  }
+}
+
+function automationKeywordTriggerMatches(direction, text) {
+  const dir = direction === 'outbound' ? 'outbound' : 'inbound'
+  const trigger = getAutomationTriggers()[dir]
+  if (!trigger?.enabled) return true
+
+  const candidate = String(text || '').trim()
+  if (!candidate) return false
+  const keywords = Array.isArray(trigger.keywords) ? trigger.keywords : []
+  if (!keywords.length) return false
+
+  if (trigger.matchType === 'equals') {
+    const c = candidate.toLowerCase()
+    return keywords.some(k => c === String(k || '').toLowerCase())
+  }
+
+  if (trigger.matchType === 'regex') {
+    for (const pattern of keywords) {
+      try {
+        if (new RegExp(String(pattern), 'i').test(candidate)) return true
+      } catch {
+        // ignore invalid regex entry
+      }
+    }
+    return false
+  }
+
+  const c = candidate.toLowerCase()
+  return keywords.some(k => c.includes(String(k || '').toLowerCase()))
+}
+
 function shouldForwardToN8n(rec, textForRules) {
   if (!automations?.enabled) return false
   if (!getAutomationWebhookUrls().length) return false
+
+  const direction = rec?.direction === 'out' ? 'outbound' : 'inbound'
+  const candidateText = String(textForRules ?? rec?.text ?? '').trim()
+
+  if (!automationKeywordTriggerMatches(direction, candidateText)) return false
+
+  if (direction === 'outbound') return true
 
   const rule = getAutomationRuleForChat(rec.chatJid)
   if (!rule.enabled) return false
@@ -1967,6 +2180,11 @@ function shouldForwardToN8n(rec, textForRules) {
 
   // Rate limit
   if (!rateLimitOk(rec.chatJid, rule)) return false
+
+  const inboundKeywordTrigger = getAutomationTriggers().inbound
+  if (inboundKeywordTrigger?.enabled) {
+    return true
+  }
 
   // Prefix gating (consistent bot UX): when enabled, both DM and group forwarding
   // require the message to begin with the prefix.
@@ -2041,16 +2259,27 @@ async function startN8nWorker() {
 }
 
 async function postToN8n(evt) {
-  const urls = getAutomationWebhookUrls()
+  // Per-rule URL takes priority over the global URL list
+  const urls = evt._webhookUrl ? [evt._webhookUrl] : getAutomationWebhookUrls()
   if (!urls.length) return
 
-  const bodyString = JSON.stringify(evt)
+  // Per-rule secret falls back to global secret (undefined means "use global")
+  const secret = (evt._webhookSecret !== undefined)
+    ? String(evt._webhookSecret || '').trim()
+    : String(automations.sharedSecret || '').trim()
+
+  // Strip internal routing fields from the payload sent downstream
+  const payload = { ...evt }
+  delete payload._webhookUrl
+  delete payload._webhookSecret
+
+  if (secret) {
+    payload.sharedSecret = secret
+  }
+
+  const bodyString = JSON.stringify(payload)
   const headers = { 'Content-Type': 'application/json' }
-
-  // optional shared secret header (no crypto)
-  const secret = String(automations.sharedSecret || '').trim();
-  if (secret) headers['x-watson-secret'] = secret;
-
+  if (secret) headers['x-watson-secret'] = secret
 
   // Basic fetch with timeout
   const controller = new AbortController()
@@ -2068,13 +2297,28 @@ async function postToN8n(evt) {
   }
 }
 
-function buildN8nEvent(rec, rawText) {
-  const rule = getAutomationRuleForChat(rec.chatJid)
+function buildN8nEvent(rec, rawText, webhookRule = null) {
+  const isOutbound = rec?.direction === 'out'
+  const automationRule = getAutomationRuleForChat(rec.chatJid)
   const mediaSignedUrl = rec.media?.fileName ? signMediaUrl(rec.media.fileName) : null
+  const safeWebhookRule = webhookRule ? {
+    id: webhookRule.id || null,
+    name: webhookRule.name || null,
+    enabled: webhookRule.enabled !== false,
+    url: webhookRule.url || null,
+    direction: webhookRule.direction || 'both',
+    scope: webhookRule.scope || 'both',
+    matchType: webhookRule.matchType || 'any',
+    matchValue: webhookRule.matchValue || '',
+    dmFilterMode: webhookRule.dmFilterMode || 'all',
+    dmFilterValues: Array.isArray(webhookRule.dmFilterValues) ? webhookRule.dmFilterValues : []
+  } : null
   return {
-    event: 'inbound_message',
+    event: isOutbound ? 'outbound_message' : 'inbound_message',
     eventId: rec.id,
     ts: rec.ts,
+    direction: isOutbound ? 'out' : 'in',
+    source: String(rec?.source || (isOutbound ? 'api' : 'whatsapp')),
     chatJid: rec.chatJid,
     isGroup: rec.isGroup,
     senderJid: rec.senderJid,
@@ -2087,12 +2331,42 @@ function buildN8nEvent(rec, rawText) {
       localPath: rec.media.path || null, // optional (n8n usually can't access this)
       signedUrl: mediaSignedUrl
     } : null,
-    rule: {
-      // pass only safe subset
-      groupMode: rule.groupMode,
-      groupPrefix: rule.groupPrefix,
-      templates: rule.templates || []
+    rule: safeWebhookRule || {
+      // backward compat: when no webhook rule is matched, keep the legacy automation rule shape
+      groupMode: automationRule.groupMode,
+      groupPrefix: automationRule.groupPrefix,
+      templates: automationRule.templates || []
+    },
+    automationRule: {
+      groupMode: automationRule.groupMode,
+      groupPrefix: automationRule.groupPrefix,
+      templates: automationRule.templates || []
     }
+  }
+}
+
+function maybeForwardMessageToN8n(rec, textForRules) {
+  try {
+    const store = readWebhookRulesStore()
+    if (store.rules.length > 0) {
+      // New rules-based system: each matching webhook fires independently
+      const matching = findMatchingWebhookRules(rec, textForRules)
+      for (const rule of matching) {
+        const evt = buildN8nEvent(rec, textForRules, rule)
+        evt._webhookUrl = rule.url
+        evt._webhookSecret = rule.sharedSecret || undefined
+        evt._webhookRuleId = rule.id
+        evt._webhookRuleName = rule.name
+        enqueueN8nEvent(evt)
+      }
+    } else {
+      // Backward compat: fall back to global automations config + single shouldForwardToN8n gate
+      if (shouldForwardToN8n(rec, textForRules)) {
+        enqueueN8nEvent(buildN8nEvent(rec, textForRules))
+      }
+    }
+  } catch (e) {
+    console.warn('⚠️ n8n forward (skipped):', e?.message)
   }
 }
 
@@ -5870,14 +6144,8 @@ async function startWhatsApp() {
 
       // Forward to n8n (if enabled + allowed by rules)
       if (isLiveNotify) {
-        try {
-          const textForRules = (type === 'text' ? text : (textRaw ? String(textRaw).trim() : ''))
-          if (shouldForwardToN8n(rec, textForRules)) {
-            enqueueN8nEvent(buildN8nEvent(rec, textForRules))
-          }
-        } catch (e) {
-          console.warn('⚠️ n8n forward (skipped):', e?.message)
-        }
+        const textForRules = (type === 'text' ? text : (textRaw ? String(textRaw).trim() : ''))
+        maybeForwardMessageToN8n(rec, textForRules)
       }
 
       // response rules (preferred)
@@ -6268,6 +6536,7 @@ async function queueScheduledText(to, message, scheduleId) {
     type: 'text',
     text: payload.text,
     status: 'queued',
+    source: 'schedule_api',
     scheduleId: scheduleId || null
   })
 
@@ -6284,6 +6553,8 @@ async function queueScheduledText(to, message, scheduleId) {
     media: saved.media || null,
     quotedMessageId: saved.quotedMessageId || null
   })
+
+  maybeForwardMessageToN8n(saved, payload.text)
 
   const jobId = await enqueue({
     id: makeId('job_sched_txt'),
@@ -6682,6 +6953,7 @@ app.post('/send', requireApiToggle('sendTextEnabled', 'Text API'), requireConnec
       type: payloadType(payload),
       text: payload.text,
       status: 'queued',
+      source: 'public_api',
       quotedMessageId: quotedMessageId || null
     })
     upsertRecentMessage({
@@ -6697,6 +6969,8 @@ app.post('/send', requireApiToggle('sendTextEnabled', 'Text API'), requireConnec
         media: saved.media || null,
         quotedMessageId: saved.quotedMessageId || null
         })
+
+      maybeForwardMessageToN8n(saved, payload.text)
 
 
     const jobId = await enqueue({
@@ -6788,6 +7062,7 @@ app.post('/send/image', requireApiToggle('sendImageEnabled', 'Image API'), requi
       text: (caption && String(caption).trim()) ? String(caption).trim() : '[image]',
       media,
       status: 'queued',
+      source: 'public_api',
       quotedMessageId: quotedMessageId || null
     })
     upsertRecentMessage({
@@ -6803,6 +7078,8 @@ app.post('/send/image', requireApiToggle('sendImageEnabled', 'Image API'), requi
         media: saved.media || null,
         quotedMessageId: saved.quotedMessageId || null
         })
+
+      maybeForwardMessageToN8n(saved, saved.text)
 
 
     const jobId = await enqueue({
@@ -6897,6 +7174,7 @@ app.post('/send/document', requireApiToggle('sendDocumentEnabled', 'Document API
       text: media?.fileName ? `[document] ${media.fileName}` : '[document]',
       media,
       status: 'queued',
+      source: 'public_api',
       quotedMessageId: quotedMessageId || null
     })
     upsertRecentMessage({
@@ -6912,6 +7190,8 @@ app.post('/send/document', requireApiToggle('sendDocumentEnabled', 'Document API
         media: saved.media || null,
         quotedMessageId: saved.quotedMessageId || null
         })
+
+      maybeForwardMessageToN8n(saved, saved.text)
 
 
     const jobId = await enqueue({
@@ -7445,6 +7725,55 @@ app.delete('/admin/rules/:id', adminKeyMiddleware, (req, res) => {
     res.json({ ok: true, removed: before !== responseRules.rules.length, rulesConfig: responseRules })
   } catch (e) {
     res.status(400).json({ ok: false, error: e?.message || 'Failed to delete rule' })
+  }
+})
+
+// ─── Webhook Rules CRUD ───────────────────────────────────────────────────────
+
+app.get('/admin/webhook-rules', adminKeyMiddleware, (req, res) => {
+  const store = readWebhookRulesStore()
+  res.json({ ok: true, webhookRulesConfig: store })
+})
+
+app.post('/admin/webhook-rules/config', adminKeyMiddleware, (req, res) => {
+  try {
+    readWebhookRulesStore()
+    webhookRules.enabled = Boolean(req.body?.enabled)
+    saveWebhookRulesStore()
+    res.json({ ok: true, webhookRulesConfig: webhookRules })
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e?.message || 'Failed to update webhook rules config' })
+  }
+})
+
+app.post('/admin/webhook-rules', adminKeyMiddleware, (req, res) => {
+  try {
+    readWebhookRulesStore()
+    const incomingId = String(req.body?.id || '').trim()
+    const idx = incomingId ? webhookRules.rules.findIndex(r => String(r.id) === incomingId) : -1
+    const existing = idx >= 0 ? webhookRules.rules[idx] : null
+    const rule = validateWebhookRule(normalizeWebhookRule(req.body || {}, existing))
+
+    if (idx >= 0) webhookRules.rules[idx] = rule
+    else webhookRules.rules.push(rule)
+
+    saveWebhookRulesStore()
+    res.json({ ok: true, rule, webhookRulesConfig: webhookRules })
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e?.message || 'Failed to save webhook rule' })
+  }
+})
+
+app.delete('/admin/webhook-rules/:id', adminKeyMiddleware, (req, res) => {
+  try {
+    readWebhookRulesStore()
+    const id = String(req.params.id || '').trim()
+    const before = webhookRules.rules.length
+    webhookRules.rules = webhookRules.rules.filter(r => String(r.id) !== id)
+    saveWebhookRulesStore()
+    res.json({ ok: true, removed: before !== webhookRules.rules.length, webhookRulesConfig: webhookRules })
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e?.message || 'Failed to delete webhook rule' })
   }
 })
 
@@ -8362,6 +8691,7 @@ app.post('/admin/send/text', adminKeyMiddleware, requireConnected, async (req, r
       type: payloadType(payload),
       text: payload.text,
       status: 'queued',
+      source: 'admin_api',
       quotedMessageId: quotedMessageId || null
     })
     upsertRecentMessage({
@@ -8377,6 +8707,8 @@ app.post('/admin/send/text', adminKeyMiddleware, requireConnected, async (req, r
         media: saved.media || null,
         quotedMessageId: saved.quotedMessageId || null
         })
+
+      maybeForwardMessageToN8n(saved, payload.text)
 
 
     const jobId = await enqueue({
@@ -8466,6 +8798,7 @@ app.post('/admin/send/image', adminKeyMiddleware, requireConnected, upload.singl
       text: (caption && String(caption).trim()) ? String(caption).trim() : '[image]',
       media,
       status: 'queued',
+      source: 'admin_api',
       quotedMessageId: quotedMessageId || null
     })
     upsertRecentMessage({
@@ -8481,6 +8814,8 @@ app.post('/admin/send/image', adminKeyMiddleware, requireConnected, upload.singl
         media: saved.media || null,
         quotedMessageId: saved.quotedMessageId || null
         })
+
+      maybeForwardMessageToN8n(saved, saved.text)
 
 
     const jobId = await enqueue({
@@ -8574,6 +8909,7 @@ if (req.file?.path) {
       text: media?.fileName ? `[document] ${media.fileName}` : '[document]',
       media,
       status: 'queued',
+      source: 'admin_api',
       quotedMessageId: quotedMessageId || null
     })
     upsertRecentMessage({
@@ -8589,6 +8925,8 @@ if (req.file?.path) {
         media: saved.media || null,
         quotedMessageId: saved.quotedMessageId || null
         })
+
+      maybeForwardMessageToN8n(saved, saved.text)
 
 
     const jobId = await enqueue({
@@ -8721,6 +9059,16 @@ async function hydrateStoresFromDb() {
   const rulesData = await ensureKv('rules', defaultRulesConfig)
   if (rulesData) {
     responseRules = rulesData
+  }
+
+  // --- Webhook Rules ---
+  const webhookRulesData = await ensureKv('webhook_rules', defaultWebhookRulesConfig)
+  if (webhookRulesData) {
+    webhookRules = {
+      ...defaultWebhookRulesConfig(),
+      ...webhookRulesData,
+      rules: Array.isArray(webhookRulesData.rules) ? webhookRulesData.rules : []
+    }
   }
 
   // --- Templates ---

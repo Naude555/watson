@@ -1320,6 +1320,7 @@
         <button class="nav-item icon" data-panel="contacts" onclick="showPanel('contacts', this)">👤 Contacts</button>
         <button class="nav-item icon" data-panel="groups" onclick="showPanel('groups', this)">👥 Groups</button>
         <button class="nav-item icon" data-panel="rules" onclick="showPanel('rules', this)">🧠 Rules</button>
+        <button class="nav-item icon" data-panel="webhooks" onclick="showPanel('webhooks', this)">🔔 Webhooks</button>
         <button class="nav-item icon" data-panel="templates" onclick="showPanel('templates', this)">🧩 Templates</button>
         <button class="nav-item icon" data-panel="schedule" onclick="showPanel('schedule', this)">⏱️ Schedule</button>
         <button class="nav-item icon" data-panel="ops" onclick="showPanel('ops', this)">⚙️ Operations</button>
@@ -1706,7 +1707,84 @@
           </div>
         </div>
 
-        <!-- TEMPLATES -->
+        <!-- WEBHOOKS -->
+        <div class="panel" id="panelWebhooks">
+          <div class="grid-2">
+            <div class="card">
+              <h3>Webhook Rules</h3>
+              <div class="card-desc">Each rule sends matching messages to a specific webhook URL</div>
+              <div id="webhookFormMode" style="margin-top:8px;font-size:11px;color:#8d94a5;">Creating a new webhook rule</div>
+              <input id="webhookId" type="hidden" />
+              <input id="webhookEnabled" type="hidden" value="true" />
+
+              <div class="label" style="margin-top: 12px;">Name</div>
+              <input id="webhookName" placeholder="e.g., Support escalation hook" />
+
+              <div class="label" style="margin-top: 8px;">Webhook URL</div>
+              <input id="webhookUrl" placeholder="https://n8n.example.com/webhook/abc123" />
+
+              <div class="label" style="margin-top: 8px;">Shared Secret <span style="color:#8d94a5;font-size:11px;">(optional, overrides global)</span></div>
+              <input id="webhookSharedSecret" type="password" placeholder="Leave blank to use global secret" autocomplete="new-password" />
+
+              <div class="label" style="margin-top: 8px;">Direction</div>
+              <select id="webhookDirection">
+                <option value="both">Both (inbound &amp; outbound)</option>
+                <option value="inbound">Inbound only</option>
+                <option value="outbound">Outbound only</option>
+              </select>
+
+              <div class="label" style="margin-top: 8px;">Scope</div>
+              <select id="webhookScope">
+                <option value="both">Both (DMs &amp; groups)</option>
+                <option value="dm">DM only</option>
+                <option value="group">Group only</option>
+              </select>
+
+              <div class="label" style="margin-top: 8px;">DM Sender Filter</div>
+              <select id="webhookDmFilterMode" onchange="updateWebhookDmFilterDisplay()">
+                <option value="all">Apply to all DMs</option>
+                <option value="include">Apply only to listed senders</option>
+                <option value="exclude">Skip listed senders</option>
+              </select>
+
+              <div id="webhookDmFilterBox" style="display:none;">
+                <div class="label" style="margin-top: 8px;">Pick senders from contacts</div>
+                <input id="webhookDmFilterSearch" placeholder="Filter contacts by name/number/jid…" oninput="syncWebhookDmFilterPicker()" />
+                <select id="webhookDmFilterPickList" multiple size="6" ondblclick="addSelectedSendersToWebhookList()" style="margin-top:8px;"></select>
+                <div class="row" style="margin-top:8px;">
+                  <button class="btn-ghost" type="button" onclick="addSelectedSendersToWebhookList()">Add Selected</button>
+                  <button class="btn-ghost" type="button" onclick="addAllFilteredSendersToWebhookList()">Add All Filtered</button>
+                </div>
+                <div class="label" style="margin-top: 8px;">DM Sender List</div>
+                <div id="webhookDmFilterChips" class="recipient-chips" style="min-height:38px;padding:6px 8px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:8px;align-content:flex-start;"></div>
+              </div>
+
+              <div class="label" style="margin-top: 8px;">Match Mode</div>
+              <select id="webhookMatch" onchange="updateWebhookMatchDisplay()">
+                <option value="any">Any message (no filter)</option>
+                <option value="contains">Contains (any case)</option>
+                <option value="startswith">Starts With</option>
+                <option value="equals">Exact Match</option>
+                <option value="regex">Regular Expression</option>
+              </select>
+
+              <div id="webhookKeywordBox" style="display:none;">
+                <div class="label" style="margin-top: 8px;">Keyword / Pattern</div>
+                <input id="webhookKeyword" placeholder="e.g., urgent" />
+              </div>
+
+              <div class="row" style="margin-top: 12px;">
+                <button onclick="saveWebhookRule()" style="flex:1;">Save Webhook Rule</button>
+                <button class="btn-ghost" type="button" onclick="resetWebhookRuleForm()">Cancel Edit</button>
+              </div>
+            </div>
+
+            <div class="card">
+              <h3>Saved Webhook Rules</h3>
+              <div id="webhookRulesList"></div>
+            </div>
+          </div>
+        </div>
         <div class="panel" id="panelTemplates">
           <div class="grid-2">
             <div class="card">
@@ -1856,6 +1934,59 @@
                     <div class="ops-toggle-row ops-advanced"><div><div class="ops-toggle-title">Image</div><div class="ops-toggle-desc">Forward image message events.</div></div><label class="ui-toggle" aria-label="Toggle image forwarding"><input id="opsN8nForwardImage" type="checkbox" /><span class="ui-toggle-track"></span></label></div>
                     <div class="ops-toggle-row ops-advanced"><div><div class="ops-toggle-title">Document</div><div class="ops-toggle-desc">Forward document message events.</div></div><label class="ui-toggle" aria-label="Toggle document forwarding"><input id="opsN8nForwardDocument" type="checkbox" /><span class="ui-toggle-track"></span></label></div>
                     <div class="ops-toggle-row ops-advanced"><div><div class="ops-toggle-title">Other</div><div class="ops-toggle-desc">Forward any other supported message types.</div></div><label class="ui-toggle" aria-label="Toggle other forwarding"><input id="opsN8nForwardOther" type="checkbox" /><span class="ui-toggle-track"></span></label></div>
+                  </div>
+
+                  <div class="ops-section-title">Direction Keyword Triggers</div>
+                  <div class="ops-grid">
+                    <div class="ops-field">
+                      <div class="label">Inbound Trigger</div>
+                      <div class="ops-toggle-list" style="margin-bottom:8px;">
+                        <div class="ops-toggle-row">
+                          <div>
+                            <div class="ops-toggle-title">Enable inbound keyword filter</div>
+                            <div class="ops-toggle-desc">Forward inbound only when text matches your rules.</div>
+                          </div>
+                          <label class="ui-toggle" aria-label="Toggle inbound trigger">
+                            <input id="opsN8nInboundTriggerEnabled" type="checkbox" />
+                            <span class="ui-toggle-track"></span>
+                          </label>
+                        </div>
+                      </div>
+                      <div class="label">Match Type</div>
+                      <select id="opsN8nInboundMatchType">
+                        <option value="contains">Contains</option>
+                        <option value="equals">Equals</option>
+                        <option value="regex">Regex</option>
+                      </select>
+                      <div class="label" style="margin-top:8px;">Keywords / Patterns</div>
+                      <textarea id="opsN8nInboundKeywords" rows="5" placeholder="help\norder\n^urgent" style="min-height:100px;"></textarea>
+                      <div class="ops-help">One entry per line. Commas and semicolons are also accepted.</div>
+                    </div>
+
+                    <div class="ops-field">
+                      <div class="label">Outbound Trigger</div>
+                      <div class="ops-toggle-list" style="margin-bottom:8px;">
+                        <div class="ops-toggle-row">
+                          <div>
+                            <div class="ops-toggle-title">Enable outbound keyword filter</div>
+                            <div class="ops-toggle-desc">Forward outbound API messages only when text matches.</div>
+                          </div>
+                          <label class="ui-toggle" aria-label="Toggle outbound trigger">
+                            <input id="opsN8nOutboundTriggerEnabled" type="checkbox" />
+                            <span class="ui-toggle-track"></span>
+                          </label>
+                        </div>
+                      </div>
+                      <div class="label">Match Type</div>
+                      <select id="opsN8nOutboundMatchType">
+                        <option value="contains">Contains</option>
+                        <option value="equals">Equals</option>
+                        <option value="regex">Regex</option>
+                      </select>
+                      <div class="label" style="margin-top:8px;">Keywords / Patterns</div>
+                      <textarea id="opsN8nOutboundKeywords" rows="5" placeholder="invoice\npaid\n#handoff" style="min-height:100px;"></textarea>
+                      <div class="ops-help">One entry per line. Commas and semicolons are also accepted.</div>
+                    </div>
                   </div>
 
                   <div class="ops-section-title ops-advanced">Default Chat Rules</div>
@@ -2137,6 +2268,6 @@
 
   <div class="toast hidden" id="toast"></div>
   
-  <script src="assets/admin-v2.js?v=20260403-04"></script>
+  <script src="assets/admin-v2.js?v=20260601-01"></script>
 </body>
 </html>
