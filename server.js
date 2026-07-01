@@ -1590,6 +1590,58 @@ function saveRulesStore() {
 
 // ─── Webhook Rules Store ────────────────────────────────────────────────────
 
+function normalizeWebhookCondition(input, fallback) {
+  const src = input && typeof input === 'object' ? input : {}
+  const ext = fallback && typeof fallback === 'object' ? fallback : {}
+  const allowed = ['any', 'contains', 'equals', 'regex', 'startswith']
+  const matchType = allowed.includes(String(src.matchType || ''))
+    ? String(src.matchType)
+    : (allowed.includes(String(ext.matchType || '')) ? String(ext.matchType) : 'any')
+  const matchValue = String(src.matchValue !== undefined ? src.matchValue : (ext.matchValue || '')).trim()
+  return {
+    id: String(src.id || ext.id || '').trim() || makeId('whrc'),
+    matchType,
+    matchValue: matchType === 'any' ? '' : matchValue
+  }
+}
+
+function normalizeWebhookConditions(rawConditions, fallbackMatchType, fallbackMatchValue) {
+  const list = Array.isArray(rawConditions) ? rawConditions : []
+  let out = list
+    .map(c => normalizeWebhookCondition(c, null))
+    .filter(c => c.matchType === 'any' || c.matchValue)
+
+  if (!out.length) {
+    const fallback = normalizeWebhookCondition({
+      matchType: fallbackMatchType,
+      matchValue: fallbackMatchValue
+    }, null)
+    if (fallback.matchType === 'any' || fallback.matchValue) out = [fallback]
+  }
+
+  if (!out.length) out = [normalizeWebhookCondition({ matchType: 'any', matchValue: '' }, null)]
+  return out
+}
+
+function webhookConditionMatches(condition, candidateRaw) {
+  const cond = normalizeWebhookCondition(condition, null)
+  const candidate = String(candidateRaw || '').trim()
+  const pattern = String(cond.matchValue || '').trim()
+
+  if (cond.matchType === 'any') return true
+  if (!pattern) return true
+  if (!candidate) return false
+
+  if (cond.matchType === 'equals') return candidate.toLowerCase() === pattern.toLowerCase()
+  if (cond.matchType === 'contains') return candidate.toLowerCase().includes(pattern.toLowerCase())
+  if (cond.matchType === 'startswith') return candidate.toLowerCase().startsWith(pattern.toLowerCase())
+  if (cond.matchType === 'regex') {
+    try { return new RegExp(pattern, 'i').test(candidate) }
+    catch { return false }
+  }
+  return false
+}
+
 function normalizeWebhookRule(input, existing) {
   const src = input && typeof input === 'object' ? input : {}
   const ext = existing && typeof existing === 'object' ? existing : {}
@@ -1608,6 +1660,10 @@ function normalizeWebhookRule(input, existing) {
     ? String(src.matchType)
     : ((['any', 'contains', 'equals', 'regex', 'startswith'].includes(String(ext.matchType || ''))) ? String(ext.matchType) : 'any')
 
+  const conditionLogic = ['and', 'or'].includes(String(src.conditionLogic || ''))
+    ? String(src.conditionLogic)
+    : ((['and', 'or'].includes(String(ext.conditionLogic || ''))) ? String(ext.conditionLogic) : 'and')
+
   const dmFilterMode = ['all', 'include', 'exclude'].includes(String(src.dmFilterMode || ''))
     ? String(src.dmFilterMode)
     : ((['all', 'include', 'exclude'].includes(String(ext.dmFilterMode || ''))) ? String(ext.dmFilterMode) : 'all')
@@ -1618,9 +1674,19 @@ function normalizeWebhookRule(input, existing) {
 
   const name = String(src.name !== undefined ? src.name : (ext.name || '')).trim().slice(0, 200) || `Webhook ${id.slice(-6)}`
   const url = String(src.url !== undefined ? src.url : (ext.url || '')).trim()
-  const sharedSecret = String(src.sharedSecret !== undefined ? src.sharedSecret : (ext.sharedSecret || '')).trim()
+  const sharedSecret = String(
+    src.sharedSecret !== undefined
+      ? src.sharedSecret
+      : (src.secret !== undefined ? src.secret : (ext.sharedSecret || ext.secret || ''))
+  ).trim()
   const matchValue = String(src.matchValue !== undefined ? src.matchValue : (ext.matchValue || '')).trim()
   const enabled = src.enabled === undefined ? (ext.enabled === undefined ? true : Boolean(ext.enabled)) : Boolean(src.enabled)
+  const conditions = normalizeWebhookConditions(
+    src.conditions !== undefined ? src.conditions : ext.conditions,
+    matchType,
+    matchValue
+  )
+  const primary = conditions[0] || { matchType: 'any', matchValue: '' }
 
   return {
     id,
@@ -1630,8 +1696,10 @@ function normalizeWebhookRule(input, existing) {
     sharedSecret,
     direction,
     scope,
-    matchType,
-    matchValue,
+    conditionLogic,
+    conditions,
+    matchType: primary.matchType,
+    matchValue: primary.matchValue,
     dmFilterMode,
     dmFilterValues,
     createdAt: Number(ext.createdAt || src.createdAt || now),
@@ -1668,24 +1736,14 @@ function webhookRuleMatches(rule, rec, textForRules) {
     if (rule.dmFilterMode === 'exclude' && inList) return false
   }
 
-  // Match type / value filter
-  if (rule.matchType !== 'any') {
-    const candidate = String(textForRules ?? rec?.text ?? '').trim()
-    const pattern = String(rule.matchValue || '').trim()
-    if (pattern) {
-      if (!candidate) return false
-      if (rule.matchType === 'equals') {
-        if (candidate.toLowerCase() !== pattern.toLowerCase()) return false
-      } else if (rule.matchType === 'contains') {
-        if (!candidate.toLowerCase().includes(pattern.toLowerCase())) return false
-      } else if (rule.matchType === 'startswith') {
-        if (!candidate.toLowerCase().startsWith(pattern.toLowerCase())) return false
-      } else if (rule.matchType === 'regex') {
-        try {
-          if (!new RegExp(pattern, 'i').test(candidate)) return false
-        } catch { return false }
-      }
-    }
+  // Match filter (multi-condition AND/OR with backward compatibility)
+  const candidate = String(textForRules ?? rec?.text ?? '').trim()
+  const conditions = normalizeWebhookConditions(rule.conditions, rule.matchType, rule.matchValue)
+  const logic = ['and', 'or'].includes(String(rule.conditionLogic || '')) ? String(rule.conditionLogic) : 'and'
+  if (logic === 'or') {
+    if (!conditions.some(c => webhookConditionMatches(c, candidate))) return false
+  } else {
+    if (!conditions.every(c => webhookConditionMatches(c, candidate))) return false
   }
 
   return true

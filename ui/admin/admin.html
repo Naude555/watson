@@ -49,6 +49,7 @@
       <div class="tab" id="tabContacts" onclick="showTab('contacts')">Contacts & Aliases</div>
       <div class="tab" id="tabGroups" onclick="showTab('groups')">Groups</div>
       <div class="tab" id="tabRules" onclick="showTab('rules')">Rules</div>
+      <div class="tab" id="tabWebhookRules" onclick="showTab('webhookrules')">Webhook Rules</div>
       <div class="tab" id="tabAutomations" onclick="showTab('automations')">Automations</div>
     </div>
 
@@ -525,6 +526,114 @@
           <div class="field">
             <label>Inspector</label>
             <pre id="rulesInspector" class="codeBox">{}</pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Webhook Rules -->
+  <div id="panelWebhookRules" class="hidden">
+    <div class="card">
+      <div class="row" style="justify-content:space-between;align-items:flex-start;gap:12px">
+        <div>
+          <div style="font-weight:900;font-size:16px">Webhook Rules (n8n Routing)</div>
+          <div class="small">Route inbound/outbound messages to different webhooks based on direction and chat type (DM, group, newsletter, broadcast).</div>
+        </div>
+        <div class="row" style="align-items:flex-end">
+          <button class="btnGhost" type="button" id="btnWebhookRulesReload">Reload</button>
+          <button class="btnGhost" type="button" id="btnWebhookRulesNew">New Rule</button>
+          <button class="btnPrimary" type="button" id="btnWebhookRulesSave">Save Rule</button>
+          <button class="btnDanger" type="button" id="btnWebhookRulesDelete" disabled>Delete</button>
+        </div>
+      </div>
+
+      <div class="field" style="margin-top:12px">
+        <label class="row"><input type="checkbox" id="webhookRulesEnabled"> <span><b>Enable webhook rules</b></span></label>
+        <div class="small">When enabled, matching webhook rules fire independently to their configured URLs.</div>
+      </div>
+
+      <div class="grid2" style="margin-top:12px">
+        <div class="panel">
+          <div style="font-weight:800;margin-bottom:8px">Rule List</div>
+          <div id="webhookRulesList" class="listBox" style="max-height:420px;overflow:auto"></div>
+        </div>
+
+        <div class="panel">
+          <div class="field">
+            <label>Selected Rule</label>
+            <div class="row">
+              <div class="grow3">
+                <div id="webhookRuleSelectedTitle" style="font-weight:700">New rule</div>
+                <div id="webhookRuleSelectedMeta" class="small">Webhook rule</div>
+              </div>
+              <span id="webhookRuleSelectedBadge" class="badge type">Draft</span>
+            </div>
+          </div>
+
+          <div class="field">
+            <label class="row"><input type="checkbox" id="webhookRuleEnabled" checked> <span>Rule enabled</span></label>
+          </div>
+
+          <div class="field">
+            <label>Name</label>
+            <input id="webhookRuleName" type="text" placeholder="Example: Newsletter webhook" />
+          </div>
+
+          <div class="field">
+            <label>Webhook URL</label>
+            <input id="webhookRuleUrl" type="text" placeholder="https://n8n.example.com/webhook/..." />
+          </div>
+
+          <div class="field">
+            <label>Shared Secret (optional)</label>
+            <input id="webhookRuleSecret" type="password" placeholder="Secret for webhook signature" />
+          </div>
+
+          <div class="field">
+            <div class="row">
+              <div class="grow">
+                <label>Direction</label>
+                <select id="webhookRuleDirection">
+                  <option value="both">Both (In + Out)</option>
+                  <option value="inbound">Inbound only</option>
+                  <option value="outbound">Outbound only</option>
+                </select>
+              </div>
+              <div class="grow">
+                <label>Scope</label>
+                <select id="webhookRuleScope">
+                  <option value="both">All chats</option>
+                  <option value="dm">DM only</option>
+                  <option value="group">Group only</option>
+                  <option value="newsletter">Newsletter only</option>
+                  <option value="broadcast">Broadcast only</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div class="field">
+            <div class="row" style="justify-content:space-between;align-items:flex-end;gap:8px">
+              <div>
+                <label>Match Conditions</label>
+                <div class="small">Add multiple conditions and combine them with AND/OR.</div>
+              </div>
+              <div class="row" style="align-items:center;gap:8px">
+                <label style="margin:0">Join With</label>
+                <select id="webhookRuleConditionLogic" style="max-width:120px">
+                  <option value="and">AND</option>
+                  <option value="or">OR</option>
+                </select>
+                <button class="btnGhost" type="button" id="btnWebhookCondAdd">Add condition</button>
+              </div>
+            </div>
+            <div id="webhookRuleConditions" class="listBox" style="margin-top:8px"></div>
+          </div>
+
+          <div class="field">
+            <label>Inspector</label>
+            <pre id="webhookRulesInspector" class="codeBox">{}</pre>
           </div>
         </div>
       </div>

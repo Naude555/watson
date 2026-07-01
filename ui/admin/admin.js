@@ -90,6 +90,8 @@ function showTab(which){
   if(tGroups) tGroups.classList.toggle('active', which==='groups');
   const tRules = document.getElementById('tabRules');
   if(tRules) tRules.classList.toggle('active', which==='rules');
+  const tWebhookRules = document.getElementById('tabWebhookRules');
+  if(tWebhookRules) tWebhookRules.classList.toggle('active', which==='webhookrules');
   const tAuto = document.getElementById('tabAutomations');
   if(tAuto) tAuto.classList.toggle('active', which==='automations');
 
@@ -106,6 +108,8 @@ function showTab(which){
   if(pGroups) pGroups.classList.toggle('hidden', which!=='groups');
   const pRules = document.getElementById('panelRules');
   if(pRules) pRules.classList.toggle('hidden', which!=='rules');
+  const pWebhookRules = document.getElementById('panelWebhookRules');
+  if(pWebhookRules) pWebhookRules.classList.toggle('hidden', which!=='webhookrules');
   const pAuto = document.getElementById('panelAutomations');
   if(pAuto) pAuto.classList.toggle('hidden', which!=='automations');
 
@@ -150,10 +154,10 @@ function boot(){
   if(k && !getKey()) document.getElementById('adminKey').value = k;
 
   setPill('connecting…','neutral');
-  const tasks=[loadTargets(), loadChats(), loadCrud(), loadWaGroupsManager(), loadRules(), loadSchedules(), loadOps(), loadN8nDeadLetters()];
+  const tasks=[loadTargets(), loadChats(), loadCrud(), loadWaGroupsManager(), loadRules(), loadWebhookRules(), loadSchedules(), loadOps(), loadN8nDeadLetters()];
   if(typeof loadAutomations==='function') tasks.push(loadAutomations());
   Promise.all(tasks)
-    .then(()=>{ renderSendForm(); restartPolling(); bindRulesUi(); bindAutomationsUi(); updateSendQuoteHint(); connectPairingStream(); refreshPairingQr(); setStatus('Connected', true); })
+    .then(()=>{ renderSendForm(); restartPolling(); bindRulesUi(); bindWebhookRulesUi(); bindAutomationsUi(); updateSendQuoteHint(); connectPairingStream(); refreshPairingQr(); setStatus('Connected', true); })
     .catch(e=>setStatus(e.message,false));
 }
 boot();
@@ -1924,6 +1928,483 @@ function bindRulesUi(){
   syncRuleEditorVisibility();
   renderRulesInspector();
   renderRulesList();
+}
+
+/**
+ * ============================
+ * Webhook Rules UI
+ * ============================
+ */
+let webhookRulesState = {
+  rules: [],
+  selectedRuleId: null,
+  draft: null
+};
+
+function defaultWebhookCondition(matchType = 'contains', matchValue = ''){
+  return {
+    id: 'cond_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
+    matchType,
+    matchValue
+  };
+}
+
+function normalizeWebhookConditionsClient(conditions, fallbackType, fallbackValue){
+  const allowed = new Set(['any','contains','equals','startswith','regex']);
+  const out = (Array.isArray(conditions) ? conditions : [])
+    .map(c => ({
+      id: String(c?.id || ''),
+      matchType: allowed.has(String(c?.matchType || '')) ? String(c.matchType) : 'contains',
+      matchValue: String(c?.matchValue || '').trim()
+    }))
+    .filter(c => c.matchType === 'any' || c.matchValue);
+
+  if(out.length) return out;
+  if(fallbackType && fallbackType !== 'any' && String(fallbackValue || '').trim()) {
+    return [defaultWebhookCondition(fallbackType, String(fallbackValue || '').trim())];
+  }
+  return [defaultWebhookCondition('any', '')];
+}
+
+function getWebhookDraft(){
+  if(!webhookRulesState.draft){
+    webhookRulesState.draft = {
+      id: 'draft-' + Date.now(),
+      name: 'New webhook rule',
+      enabled: true,
+      url: '',
+      sharedSecret: '',
+      direction: 'both',
+      scope: 'both',
+      conditionLogic: 'and',
+      conditions: [defaultWebhookCondition('any', '')]
+    };
+  }
+  return webhookRulesState.draft;
+}
+
+function conditionSummary(rule){
+  const conditions = normalizeWebhookConditionsClient(rule?.conditions, rule?.matchType, rule?.matchValue);
+  const logic = (rule?.conditionLogic === 'or') ? 'OR' : 'AND';
+  if(!conditions.length) return 'Any message';
+  if(conditions.length === 1){
+    const c = conditions[0];
+    return c.matchType === 'any' ? 'Any message' : `${c.matchType}: ${c.matchValue}`;
+  }
+  return `${conditions.length} conditions (${logic})`;
+}
+
+function conditionChipText(condition){
+  if(!condition || condition.matchType === 'any') return 'Any message';
+  const value = String(condition.matchValue || '').trim();
+  if(!value) return condition.matchType;
+  const short = value.length > 24 ? (value.slice(0, 24) + '...') : value;
+  return `${condition.matchType}: ${short}`;
+}
+
+function renderWebhookConditionsEditor(){
+  const host = document.getElementById('webhookRuleConditions');
+  if(!host) return;
+  const draft = getWebhookDraft();
+  const conditions = normalizeWebhookConditionsClient(draft.conditions, draft.matchType, draft.matchValue);
+  draft.conditions = conditions;
+
+  host.innerHTML = '';
+  conditions.forEach((cond, idx) => {
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.style.alignItems = 'center';
+    row.style.gap = '8px';
+    row.style.marginTop = idx === 0 ? '0' : '8px';
+    row.dataset.condId = cond.id;
+
+    const type = document.createElement('select');
+    type.dataset.role = 'cond-type';
+    type.dataset.condId = cond.id;
+    type.style.maxWidth = '170px';
+    type.innerHTML = [
+      '<option value="any">Any message</option>',
+      '<option value="contains">Contains</option>',
+      '<option value="equals">Equals</option>',
+      '<option value="startswith">Starts with</option>',
+      '<option value="regex">Regex</option>'
+    ].join('');
+    type.value = cond.matchType;
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'grow';
+    input.dataset.role = 'cond-value';
+    input.dataset.condId = cond.id;
+    input.placeholder = cond.matchType === 'regex' ? 'Regex pattern' : 'Pattern or keyword';
+    input.value = cond.matchValue || '';
+    if(cond.matchType === 'any'){
+      input.value = '';
+      input.disabled = true;
+      input.placeholder = 'Not required for "Any message"';
+    }
+
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'btnDanger';
+    remove.dataset.role = 'cond-remove';
+    remove.dataset.condId = cond.id;
+    remove.textContent = 'Remove';
+    remove.disabled = conditions.length <= 1;
+
+    row.appendChild(type);
+    row.appendChild(input);
+    row.appendChild(remove);
+    host.appendChild(row);
+  });
+}
+
+function bindWebhookRulesUi(){
+  const btnReload = document.getElementById('btnWebhookRulesReload');
+  if(btnReload && !btnReload.dataset.bound){
+    btnReload.dataset.bound = '1';
+    btnReload.addEventListener('click', ()=>loadWebhookRules().catch(e=>setStatus(e.message,false)));
+  }
+
+  const btnNew = document.getElementById('btnWebhookRulesNew');
+  if(btnNew && !btnNew.dataset.bound){
+    btnNew.dataset.bound = '1';
+    btnNew.addEventListener('click', newWebhookRuleDraft);
+  }
+
+  const btnSave = document.getElementById('btnWebhookRulesSave');
+  if(btnSave && !btnSave.dataset.bound){
+    btnSave.dataset.bound = '1';
+    btnSave.addEventListener('click', saveWebhookRule);
+  }
+
+  const btnDelete = document.getElementById('btnWebhookRulesDelete');
+  if(btnDelete && !btnDelete.dataset.bound){
+    btnDelete.dataset.bound = '1';
+    btnDelete.addEventListener('click', deleteWebhookRule);
+  }
+
+  const webhookRulesEnabled = document.getElementById('webhookRulesEnabled');
+  if(webhookRulesEnabled && !webhookRulesEnabled.dataset.bound){
+    webhookRulesEnabled.dataset.bound = '1';
+    webhookRulesEnabled.addEventListener('change', ()=>{
+      renderWebhookRulesInspector();
+      saveWebhookRulesConfig().then(()=>setStatus('Webhook rules config saved', true)).catch(e=>setStatus(e.message, false));
+    });
+  }
+
+  const watchIds = ['webhookRuleEnabled','webhookRuleName','webhookRuleUrl','webhookRuleSecret','webhookRuleDirection','webhookRuleScope','webhookRuleConditionLogic'];
+  for(const id of watchIds){
+    const node = document.getElementById(id);
+    if(node && !node.dataset.bound){
+      node.dataset.bound = '1';
+      node.addEventListener('input', renderWebhookRulesInspector);
+      node.addEventListener('change', renderWebhookRulesInspector);
+    }
+  }
+
+  const btnAddCond = document.getElementById('btnWebhookCondAdd');
+  if(btnAddCond && !btnAddCond.dataset.bound){
+    btnAddCond.dataset.bound = '1';
+    btnAddCond.addEventListener('click', ()=>{
+      const draft = getWebhookDraft();
+      draft.conditions = normalizeWebhookConditionsClient(draft.conditions, draft.matchType, draft.matchValue);
+      draft.conditions.push(defaultWebhookCondition('contains', ''));
+      renderWebhookConditionsEditor();
+      renderWebhookRulesInspector();
+    });
+  }
+
+  const condHost = document.getElementById('webhookRuleConditions');
+  if(condHost && !condHost.dataset.bound){
+    condHost.dataset.bound = '1';
+    condHost.addEventListener('change', (e)=>{
+      const role = e.target?.dataset?.role;
+      const condId = e.target?.dataset?.condId;
+      if(!role || !condId) return;
+      const draft = getWebhookDraft();
+      const conditions = normalizeWebhookConditionsClient(draft.conditions, draft.matchType, draft.matchValue);
+      const cond = conditions.find(c => c.id === condId);
+      if(!cond) return;
+      if(role === 'cond-type'){
+        cond.matchType = e.target.value;
+        if(cond.matchType === 'any') cond.matchValue = '';
+      }
+      draft.conditions = conditions;
+      renderWebhookConditionsEditor();
+      renderWebhookRulesInspector();
+    });
+
+    condHost.addEventListener('input', (e)=>{
+      const role = e.target?.dataset?.role;
+      const condId = e.target?.dataset?.condId;
+      if(role !== 'cond-value' || !condId) return;
+      const draft = getWebhookDraft();
+      const conditions = normalizeWebhookConditionsClient(draft.conditions, draft.matchType, draft.matchValue);
+      const cond = conditions.find(c => c.id === condId);
+      if(!cond) return;
+      cond.matchValue = e.target.value;
+      draft.conditions = conditions;
+      renderWebhookRulesInspector();
+    });
+
+    condHost.addEventListener('click', (e)=>{
+      const btn = e.target?.closest('button[data-role="cond-remove"]');
+      if(!btn) return;
+      const condId = btn.dataset.condId;
+      const draft = getWebhookDraft();
+      const conditions = normalizeWebhookConditionsClient(draft.conditions, draft.matchType, draft.matchValue)
+        .filter(c => c.id !== condId);
+      draft.conditions = conditions.length ? conditions : [defaultWebhookCondition('any', '')];
+      renderWebhookConditionsEditor();
+      renderWebhookRulesInspector();
+    });
+  }
+
+  renderWebhookRulesInspector();
+  renderWebhookRulesList();
+}
+
+function newWebhookRuleDraft(){
+  webhookRulesState.selectedRuleId = null;
+  webhookRulesState.draft = {
+    id: 'draft-' + Date.now(),
+    name: 'New webhook rule',
+    enabled: true,
+    url: '',
+    sharedSecret: '',
+    direction: 'both',
+    scope: 'both',
+    conditionLogic: 'and',
+    conditions: [defaultWebhookCondition('any', '')]
+  };
+  document.getElementById('webhookRuleSelectedTitle').textContent = 'New rule';
+  document.getElementById('webhookRuleSelectedMeta').textContent = 'Webhook rule';
+  applyWebhookRuleToForm(webhookRulesState.draft);
+  setWebhookRuleSelectedBadge('Draft');
+  document.getElementById('btnWebhookRulesDelete').disabled = true;
+}
+
+function applyWebhookRuleToForm(rule){
+  if(!rule) return;
+  const normalized = JSON.parse(JSON.stringify(rule));
+  normalized.conditionLogic = (normalized.conditionLogic === 'or') ? 'or' : 'and';
+  normalized.conditions = normalizeWebhookConditionsClient(normalized.conditions, normalized.matchType, normalized.matchValue);
+  webhookRulesState.draft = normalized;
+
+  document.getElementById('webhookRuleEnabled').checked = rule.enabled ?? true;
+  document.getElementById('webhookRuleName').value = rule.name || '';
+  document.getElementById('webhookRuleUrl').value = rule.url || '';
+  document.getElementById('webhookRuleSecret').value = rule.sharedSecret || rule.secret || '';
+  document.getElementById('webhookRuleDirection').value = rule.direction || 'both';
+  document.getElementById('webhookRuleScope').value = rule.scope || 'both';
+  document.getElementById('webhookRuleConditionLogic').value = normalized.conditionLogic;
+  renderWebhookConditionsEditor();
+  renderWebhookRulesInspector();
+}
+
+function readWebhookRuleForm(){
+  const draft = getWebhookDraft();
+  const conditions = normalizeWebhookConditionsClient(draft.conditions, draft.matchType, draft.matchValue)
+    .map(c => ({
+      id: c.id,
+      matchType: c.matchType,
+      matchValue: c.matchType === 'any' ? '' : String(c.matchValue || '').trim()
+    }));
+  const primary = conditions[0] || { matchType: 'any', matchValue: '' };
+
+  return {
+    id: draft.id || ('rule-' + Date.now()),
+    name: document.getElementById('webhookRuleName').value.trim() || 'Webhook rule',
+    enabled: document.getElementById('webhookRuleEnabled').checked,
+    url: document.getElementById('webhookRuleUrl').value.trim(),
+    sharedSecret: document.getElementById('webhookRuleSecret').value.trim(),
+    direction: document.getElementById('webhookRuleDirection').value,
+    scope: document.getElementById('webhookRuleScope').value,
+    conditionLogic: document.getElementById('webhookRuleConditionLogic').value === 'or' ? 'or' : 'and',
+    conditions,
+    matchType: primary.matchType,
+    matchValue: primary.matchValue
+  };
+}
+
+function renderWebhookRulesInspector(){
+  const rule = readWebhookRuleForm();
+  webhookRulesState.draft = { ...webhookRulesState.draft, ...rule, conditions: rule.conditions };
+  document.getElementById('webhookRulesInspector').textContent = JSON.stringify(rule, null, 2);
+}
+
+function setWebhookRuleSelectedBadge(status){
+  const badge = document.getElementById('webhookRuleSelectedBadge');
+  if(badge) {
+    badge.textContent = status;
+    badge.className = 'badge ' + (status === 'Draft' ? 'type' : status === 'Saved' ? 'active' : 'inactive');
+  }
+}
+
+function renderWebhookRulesList(){
+  const list = document.getElementById('webhookRulesList');
+  if(!list) return;
+  
+  list.innerHTML = '';
+  webhookRulesState.rules.forEach(rule => {
+    const row = document.createElement('div');
+    row.className = 'listItem';
+    if(webhookRulesState.selectedRuleId && webhookRulesState.selectedRuleId === rule.id) row.classList.add('active');
+    row.style.cursor = 'pointer';
+    
+    const title = document.createElement('div');
+    title.style.fontWeight = '700';
+    title.textContent = rule.name || 'Unnamed';
+    
+    const meta = document.createElement('div');
+    meta.className = 'small';
+    const directionLabel = rule.direction === 'both' ? '↔ Both' : rule.direction === 'inbound' ? '← In' : '→ Out';
+    const scopeLabel = rule.scope === 'both' ? 'All' : rule.scope === 'dm' ? 'DM' : rule.scope === 'group' ? 'Group' : rule.scope === 'newsletter' ? 'Newsletter' : 'Broadcast';
+    meta.textContent = `${directionLabel} · ${scopeLabel}`;
+
+    const chips = document.createElement('div');
+    chips.className = 'row';
+    chips.style.gap = '6px';
+    chips.style.flexWrap = 'wrap';
+    chips.style.marginTop = '6px';
+
+    const logicChip = document.createElement('span');
+    logicChip.className = 'chip chipLogic';
+    logicChip.textContent = (rule.conditionLogic === 'or') ? 'OR' : 'AND';
+    chips.appendChild(logicChip);
+
+    const conditions = normalizeWebhookConditionsClient(rule?.conditions, rule?.matchType, rule?.matchValue);
+    const maxPreview = 3;
+    const preview = conditions.slice(0, maxPreview);
+    preview.forEach(cond => {
+      const chip = document.createElement('span');
+      chip.className = 'chip chipCond';
+      chip.textContent = conditionChipText(cond);
+      chip.title = conditionChipText(cond);
+      chips.appendChild(chip);
+    });
+    if(conditions.length > maxPreview){
+      const more = document.createElement('span');
+      more.className = 'chip chipCond';
+      more.textContent = `+${conditions.length - maxPreview} more`;
+      chips.appendChild(more);
+    }
+    
+    const status = document.createElement('span');
+    status.className = 'badge ' + (rule.enabled ? 'active' : 'inactive');
+    status.textContent = rule.enabled ? 'Enabled' : 'Disabled';
+    status.style.marginLeft = 'auto';
+    
+    row.appendChild(title);
+    row.appendChild(meta);
+    row.appendChild(chips);
+    row.appendChild(status);
+    
+    row.addEventListener('click', () => {
+      webhookRulesState.selectedRuleId = rule.id;
+      webhookRulesState.draft = JSON.parse(JSON.stringify(rule));
+      applyWebhookRuleToForm(rule);
+      document.getElementById('btnWebhookRulesDelete').disabled = false;
+      setWebhookRuleSelectedBadge('Saved');
+      document.getElementById('webhookRuleSelectedTitle').textContent = rule.name;
+      document.getElementById('webhookRuleSelectedMeta').textContent = `Webhook rule · ${rule.direction} · ${rule.scope} · ${conditionSummary(rule)}`;
+      renderWebhookRulesList();
+    });
+    
+    list.appendChild(row);
+  });
+}
+
+async function loadWebhookRules(){
+  try{
+    const res = await fetch('/admin/webhook-rules', {
+      headers: { 'x-admin-key': getKey() }
+    });
+    if(!res.ok) throw new Error(res.statusText);
+    const data = await res.json();
+    const store = data.webhookRulesConfig || data;
+    webhookRulesState.rules = store.rules || [];
+    const enabledCheckbox = document.getElementById('webhookRulesEnabled');
+    if(enabledCheckbox) enabledCheckbox.checked = store.enabled ?? true;
+    setStatus('Webhook rules loaded', true);
+    if(!webhookRulesState.draft) newWebhookRuleDraft();
+    renderWebhookRulesList();
+  }catch(e){
+    setStatus('Failed to load webhook rules: ' + e.message, false);
+    throw e;
+  }
+}
+
+async function saveWebhookRule(){
+  try{
+    const rule = readWebhookRuleForm();
+    
+    // Validation
+    if(!rule.url.trim()) throw new Error('Webhook URL is required');
+    if(!rule.name.trim()) throw new Error('Rule name is required');
+    for(const c of (rule.conditions || [])){
+      if(c.matchType !== 'any' && !String(c.matchValue || '').trim()){
+        throw new Error('Every non-"Any message" condition must have a value');
+      }
+    }
+    
+    const res = await fetch('/admin/webhook-rules', {
+      method: 'POST',
+      headers: {
+        'x-admin-key': getKey(),
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify(rule)
+    });
+    if(!res.ok) throw new Error(res.statusText);
+    
+    setStatus('Webhook rule saved', true);
+    await loadWebhookRules();
+    newWebhookRuleDraft();
+  }catch(e){
+    setStatus('Failed to save webhook rule: ' + e.message, false);
+    throw e;
+  }
+}
+
+async function deleteWebhookRule(){
+  try{
+    if(!webhookRulesState.selectedRuleId || webhookRulesState.selectedRuleId.startsWith('draft-')) {
+      throw new Error('No rule selected to delete');
+    }
+    
+    const res = await fetch(`/admin/webhook-rules/${webhookRulesState.selectedRuleId}`, {
+      method: 'DELETE',
+      headers: { 'x-admin-key': getKey() }
+    });
+    if(!res.ok) throw new Error(res.statusText);
+    
+    setStatus('Webhook rule deleted', true);
+    await loadWebhookRules();
+    newWebhookRuleDraft();
+  }catch(e){
+    setStatus('Failed to delete webhook rule: ' + e.message, false);
+    throw e;
+  }
+}
+
+async function saveWebhookRulesConfig(){
+  try{
+    const enabled = document.getElementById('webhookRulesEnabled').checked;
+    const res = await fetch('/admin/webhook-rules/config', {
+      method: 'POST',
+      headers: {
+        'x-admin-key': getKey(),
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify({ enabled })
+    });
+    if(!res.ok) throw new Error(res.statusText);
+  }catch(e){
+    setStatus('Failed to save webhook config: ' + e.message, false);
+    throw e;
+  }
 }
 
 /**
