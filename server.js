@@ -317,6 +317,10 @@ function defaultAutomationsConfig() {
         allowGroups: true,
         // if true, do not forward DMs
         allowDM: true,
+        // if true, allow newsletter chats
+        allowNewsletters: true,
+        // if true, allow broadcast chats
+        allowBroadcasts: true,
         // if true, do not forward media
         blockMedia: false
       },
@@ -1596,9 +1600,9 @@ function normalizeWebhookRule(input, existing) {
     ? String(src.direction)
     : ((['inbound', 'outbound', 'both'].includes(String(ext.direction || ''))) ? String(ext.direction) : 'both')
 
-  const scope = ['both', 'dm', 'group'].includes(String(src.scope || ''))
+  const scope = ['both', 'dm', 'group', 'newsletter', 'broadcast'].includes(String(src.scope || ''))
     ? String(src.scope)
-    : ((['both', 'dm', 'group'].includes(String(ext.scope || ''))) ? String(ext.scope) : 'both')
+    : ((['both', 'dm', 'group', 'newsletter', 'broadcast'].includes(String(ext.scope || ''))) ? String(ext.scope) : 'both')
 
   const matchType = ['any', 'contains', 'equals', 'regex', 'startswith'].includes(String(src.matchType || ''))
     ? String(src.matchType)
@@ -1650,12 +1654,14 @@ function webhookRuleMatches(rule, rec, textForRules) {
   if (rule.direction === 'outbound' && !isOutbound) return false
 
   // Scope filter
-  const isGroup = Boolean(rec?.isGroup)
-  if (rule.scope === 'dm' && isGroup) return false
-  if (rule.scope === 'group' && !isGroup) return false
+  const chatKind = chatKindFromRecord(rec)
+  if (rule.scope === 'dm' && chatKind !== 'dm') return false
+  if (rule.scope === 'group' && chatKind !== 'group') return false
+  if (rule.scope === 'newsletter' && chatKind !== 'newsletter') return false
+  if (rule.scope === 'broadcast' && chatKind !== 'broadcast') return false
 
   // DM sender filter (inbound DMs only)
-  if (!isGroup && !isOutbound && rule.dmFilterMode !== 'all') {
+  if (chatKind === 'dm' && !isOutbound && rule.dmFilterMode !== 'all') {
     const senderJid = String(rec?.senderJid || '').trim()
     const inList = (rule.dmFilterValues || []).some(v => String(v).trim() === senderJid)
     if (rule.dmFilterMode === 'include' && !inList) return false
@@ -1853,7 +1859,7 @@ async function getDependencyHealthSnapshot() {
 
 function normalizeResponseRule(input = {}, existing = null) {
   const triggerType = ['text', 'voice_note'].includes(input.triggerType) ? input.triggerType : (existing?.triggerType || 'text')
-  const scope = ['dm', 'group', 'both'].includes(input.scope) ? input.scope : (existing?.scope || 'both')
+  const scope = ['dm', 'group', 'newsletter', 'broadcast', 'both'].includes(input.scope) ? input.scope : (existing?.scope || 'both')
   const matchType = ['contains', 'equals', 'regex', 'any'].includes(input.matchType) ? input.matchType : (existing?.matchType || (triggerType === 'voice_note' ? 'any' : 'contains'))
   const dmFilterMode = ['all', 'include', 'exclude'].includes(input.dmFilterMode)
     ? input.dmFilterMode
@@ -2161,11 +2167,14 @@ function shouldForwardToN8n(rec, textForRules) {
 
   const rule = getAutomationRuleForChat(rec.chatJid)
   if (!rule.enabled) return false
+  const chatKind = chatKindFromRecord(rec)
 
   // Safety toggles
   if (rec.isGroup && rule.safety?.allowGroups === false) return false
-  if (!rec.isGroup && rule.safety?.allowDM === false) return false
-  if (!rec.isGroup && rule.dmEnabled === false) return false
+  if (chatKind === 'dm' && rule.safety?.allowDM === false) return false
+  if (chatKind === 'newsletter' && rule.safety?.allowNewsletters === false) return false
+  if (chatKind === 'broadcast' && rule.safety?.allowBroadcasts === false) return false
+  if (chatKind === 'dm' && rule.dmEnabled === false) return false
   if (rule.safety?.blockMedia && rec.type !== 'text') return false
 
   // Global forward switches
@@ -2577,6 +2586,23 @@ function calcDelay() {
   return cfg.baseDelayMs + Math.floor(Math.random() * cfg.jitterMs)
 }
 function isGroupJid(jid) { return typeof jid === 'string' && jid.endsWith('@g.us') }
+function isNewsletterJid(jid) { return typeof jid === 'string' && jid.endsWith('@newsletter') }
+function isBroadcastJid(jid) { return typeof jid === 'string' && jid.endsWith('@broadcast') }
+function isAliasTargetJid(jid) {
+  return isGroupJid(jid) || isNewsletterJid(jid) || isBroadcastJid(jid)
+}
+
+function chatKindFromJid(jidRaw, isGroupHint = false) {
+  const jid = normalizeJid(jidRaw || '')
+  if (isGroupJid(jid) || isGroupHint) return 'group'
+  if (isNewsletterJid(jid)) return 'newsletter'
+  if (isBroadcastJid(jid)) return 'broadcast'
+  return 'dm'
+}
+
+function chatKindFromRecord(rec = {}) {
+  return chatKindFromJid(rec?.chatJid || rec?.senderJid || '', Boolean(rec?.isGroup))
+}
 
 function extractTextMessage(msg) {
   return (
@@ -2637,10 +2663,13 @@ function matchValueByType(text, matchType, matchValue) {
   return false
 }
 
-function ruleScopeMatches(rule, isGroup) {
+function ruleScopeMatches(rule, inbound = {}) {
+  const chatKind = chatKindFromRecord(inbound)
   if (rule.scope === 'both') return true
-  if (rule.scope === 'group') return isGroup
-  if (rule.scope === 'dm') return !isGroup
+  if (rule.scope === 'group') return chatKind === 'group'
+  if (rule.scope === 'dm') return chatKind === 'dm'
+  if (rule.scope === 'newsletter') return chatKind === 'newsletter'
+  if (rule.scope === 'broadcast') return chatKind === 'broadcast'
   return false
 }
 
@@ -2711,7 +2740,7 @@ function findMatchingResponseRule(inbound) {
   for (const rawRule of rules) {
     const rule = normalizeResponseRule(rawRule, rawRule)
     if (!rule.enabled) continue
-    if (!ruleScopeMatches(rule, inbound.isGroup)) continue
+    if (!ruleScopeMatches(rule, inbound)) continue
     if (!ruleDmFilterMatches(rule, inbound)) continue
 
     if (rule.triggerType === 'voice_note') {
@@ -4085,14 +4114,106 @@ function mergeContacts(store, { targetName = '', sourceName = '' } = {}) {
 }
 
 function upsertGroupAlias(store, group) {
+  store.groups = Array.isArray(store.groups) ? store.groups : []
   const key = norm(group.name)
   if (!key) throw new Error('Group alias name required')
-  if (!String(group.jid || '').endsWith('@g.us')) throw new Error('Group jid must end with @g.us')
+  const jid = normalizeJid(group.jid || '')
+  if (!isAliasTargetJid(jid)) {
+    throw new Error('Alias jid must end with @g.us, @newsletter, or @broadcast')
+  }
+
+  const normalized = { ...group, name: String(group.name || '').trim(), jid }
+
+  // Prefer updating existing entries by jid so a manual save can replace an auto-synced alias.
+  const jidIdx = store.groups.findIndex(g => normalizeJid(g?.jid || '') === jid)
+  if (jidIdx >= 0) {
+    const { source, ...existing } = store.groups[jidIdx] || {}
+    store.groups[jidIdx] = { ...existing, ...normalized }
+    return store
+  }
 
   const idx = store.groups.findIndex(g => norm(g.name) === key)
-  if (idx >= 0) store.groups[idx] = { ...store.groups[idx], ...group }
-  else store.groups.push(group)
+  if (idx >= 0) {
+    const { source, ...existing } = store.groups[idx] || {}
+    store.groups[idx] = { ...existing, ...normalized }
+  } else {
+    store.groups.push(normalized)
+  }
   return store
+}
+
+function isAutoSyncedGroupAlias(group) {
+  return String(group?.source || '').trim() === 'wa-cache'
+}
+
+function pickUniqueGroupAliasName(baseNameRaw, jidRaw, usedNames = new Set()) {
+  const baseName = String(baseNameRaw || '').trim() || `Group ${String(jidRaw || '').split('@')[0].slice(-6)}`
+  const baseKey = norm(baseName)
+  if (baseKey && !usedNames.has(baseKey)) {
+    usedNames.add(baseKey)
+    return baseName
+  }
+
+  const short = String(jidRaw || '').split('@')[0].slice(-4) || 'group'
+  let i = 1
+  while (true) {
+    const suffix = i === 1 ? `(${short})` : `(${short}) #${i}`
+    const candidate = `${baseName} ${suffix}`
+    const key = norm(candidate)
+    if (!key || usedNames.has(key)) {
+      i += 1
+      continue
+    }
+    usedNames.add(key)
+    return candidate
+  }
+}
+
+function syncWaGroupAliasesFromCache() {
+  const store = readContactsStore()
+  const existingGroups = Array.isArray(store.groups) ? store.groups : []
+  const manualGroups = []
+  const autoByJid = new Map()
+
+  for (const g of existingGroups) {
+    const jid = normalizeJid(g?.jid || '')
+    if (isAutoSyncedGroupAlias(g) && isGroupJid(jid)) autoByJid.set(jid, g)
+    else manualGroups.push(g)
+  }
+
+  const usedNames = new Set(
+    manualGroups
+      .map(g => norm(g?.name || ''))
+      .filter(Boolean)
+  )
+
+  const nextGroups = [...manualGroups]
+  const waGroups = Array.from(groupCache.byJid.values())
+    .sort((a, b) => String(a?.subject || '').localeCompare(String(b?.subject || '')))
+
+  for (const g of waGroups) {
+    const jid = normalizeJid(g?.jid || '')
+    if (!isGroupJid(jid)) continue
+
+    const previous = autoByJid.get(jid) || {}
+    const baseName = String(g?.subject || previous?.name || '').trim()
+    const name = pickUniqueGroupAliasName(baseName, jid, usedNames)
+
+    nextGroups.push({
+      ...previous,
+      name,
+      jid,
+      source: 'wa-cache'
+    })
+  }
+
+  if (JSON.stringify(existingGroups) === JSON.stringify(nextGroups)) {
+    return { changed: false, count: existingGroups.length }
+  }
+
+  store.groups = nextGroups
+  writeContactsStore(store)
+  return { changed: true, count: nextGroups.length }
 }
 
 function deleteGroupAlias(store, name) {
@@ -4635,6 +4756,7 @@ async function refreshGroups() {
     }
 
     groupCache = { updatedAt: Date.now(), byJid, byName }
+    const aliasSync = syncWaGroupAliasesFromCache()
 
     let newChats = 0
     for (const group of byJid.values()) {
@@ -4662,7 +4784,7 @@ async function refreshGroups() {
       broadcastAdminMessageUpdate(jid, null, summary)
     }
 
-    console.log(`👥 Group cache updated: ${byJid.size} groups${newChats ? ` (+${newChats} new chats)` : ''}`)
+    console.log(`👥 Group cache updated: ${byJid.size} groups${newChats ? ` (+${newChats} new chats)` : ''}${aliasSync.changed ? `, aliases synced: ${aliasSync.count}` : ''}`)
     return { count: byJid.size, updatedAt: groupCache.updatedAt, newChats }
   })()
 

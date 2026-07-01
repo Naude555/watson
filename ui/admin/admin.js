@@ -26,6 +26,22 @@ let rulesState = {
   selectedId: ''
 };
 
+function chatKindFromJid(jidRaw){
+  const jid = String(jidRaw || '').trim().toLowerCase();
+  if(jid.endsWith('@g.us')) return 'group';
+  if(jid.endsWith('@newsletter')) return 'newsletter';
+  if(jid.endsWith('@broadcast')) return 'broadcast';
+  return 'dm';
+}
+
+function scopeLabel(scope){
+  if(scope === 'dm') return 'DM';
+  if(scope === 'group') return 'Group';
+  if(scope === 'newsletter') return 'Newsletter';
+  if(scope === 'broadcast') return 'Broadcast';
+  return 'All chats';
+}
+
 
 function setPill(msg, mode){
   const dot = document.getElementById('statusDot');
@@ -1411,7 +1427,7 @@ async function upsertGroup(){
   try{
     const name=document.getElementById('gName').value.trim();
     const jid=document.getElementById('gJid').value.trim();
-    if(!name||!jid) throw new Error('Alias name and group JID required');
+    if(!name||!jid) throw new Error('Alias name and target JID required');
 
     await api('/admin/groups',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,jid})});
     setStatus('Group alias saved', true);
@@ -1693,7 +1709,7 @@ function setRulesSelectedBadge(rule){
   }
 
   title.textContent = rule.name || 'Unnamed rule';
-  meta.textContent = `${rule.triggerType === 'voice_note' ? 'Voice note' : 'Text'} • ${rule.scope === 'both' ? 'DM + Group' : rule.scope.toUpperCase()}`;
+  meta.textContent = `${rule.triggerType === 'voice_note' ? 'Voice note' : 'Text'} • ${scopeLabel(rule.scope)}`;
   badge.className = 'badge ' + (rule.enabled === false ? 'failed' : 'sent');
   badge.textContent = rule.enabled === false ? 'Disabled' : 'Active';
 }
@@ -1764,7 +1780,7 @@ function renderRulesList(){
     row.style.width = '100%';
 
     const label = `${rule.triggerType === 'voice_note' ? '🎤' : '💬'} ${esc(rule.name || 'Unnamed rule')}`;
-    const sub = `${rule.scope === 'both' ? 'DM + Group' : rule.scope.toUpperCase()} • ${rule.enabled === false ? 'disabled' : 'active'}`;
+    const sub = `${scopeLabel(rule.scope)} • ${rule.enabled === false ? 'disabled' : 'active'}`;
     row.innerHTML = `<div class="grow3"><div class="liMain">${label}</div><div class="liSub">${esc(sub)}</div></div>`;
     row.addEventListener('click', ()=>{
       rulesState.selectedId = rule.id;
@@ -2025,9 +2041,9 @@ function bindAutomationsUi(){
   // any changes should re-render inspector
   const watchIds = [
     'autoEnabled','autoCatchEnabled','autoCatchText','globalPrefix','globalKeywords',
-    'globalAllowDM','globalAllowGroups','globalBlockMedia','globalRateEnabled','globalRateMaxPerMinute',
+    'globalAllowDM','globalAllowGroups','globalAllowNewsletters','globalAllowBroadcasts','globalBlockMedia','globalRateEnabled','globalRateMaxPerMinute',
     'globalQuietEnabled','globalQuietStart','globalQuietEnd','globalQuietTz',
-    'overrideEnabled','overridePrefix','overrideKeywords','overrideAllowDM','overrideAllowGroups','overrideBlockMedia',
+    'overrideEnabled','overridePrefix','overrideKeywords','overrideAllowDM','overrideAllowGroups','overrideAllowNewsletters','overrideAllowBroadcasts','overrideBlockMedia',
     'overrideRateEnabled','overrideRateMaxPerMinute','overrideQuietEnabled','overrideQuietStart','overrideQuietEnd','overrideQuietTz','overrideNotes'
   ];
   for(const id of watchIds){
@@ -2136,6 +2152,8 @@ function readGlobalForm(){
       safety: {
         allowDM: Boolean(el('globalAllowDM')?.checked),
         allowGroups: Boolean(el('globalAllowGroups')?.checked),
+        allowNewsletters: Boolean(el('globalAllowNewsletters')?.checked),
+        allowBroadcasts: Boolean(el('globalAllowBroadcasts')?.checked),
         blockMedia: Boolean(el('globalBlockMedia')?.checked)
       },
 
@@ -2178,6 +2196,8 @@ function applyGlobalToForm(gRaw){
   // Safety
   if(el('globalAllowDM')) el('globalAllowDM').checked = g.defaults?.safety?.allowDM !== false;
   if(el('globalAllowGroups')) el('globalAllowGroups').checked = g.defaults?.safety?.allowGroups !== false;
+  if(el('globalAllowNewsletters')) el('globalAllowNewsletters').checked = g.defaults?.safety?.allowNewsletters !== false;
+  if(el('globalAllowBroadcasts')) el('globalAllowBroadcasts').checked = g.defaults?.safety?.allowBroadcasts !== false;
   if(el('globalBlockMedia')) el('globalBlockMedia').checked = g.defaults?.safety?.blockMedia !== false;
 
   // Rate limit
@@ -2205,6 +2225,8 @@ function readOverrideForm(){
     safety: {
       allowDM: Boolean(el('overrideAllowDM')?.checked),
       allowGroups: Boolean(el('overrideAllowGroups')?.checked),
+      allowNewsletters: Boolean(el('overrideAllowNewsletters')?.checked),
+      allowBroadcasts: Boolean(el('overrideAllowBroadcasts')?.checked),
       blockMedia: Boolean(el('overrideBlockMedia')?.checked)
     },
 
@@ -2237,6 +2259,8 @@ function applyOverrideToForm(oRaw){
     if(el('overrideKeywords')) el('overrideKeywords').value = '';
     if(el('overrideAllowDM')) el('overrideAllowDM').checked = true;
     if(el('overrideAllowGroups')) el('overrideAllowGroups').checked = true;
+    if(el('overrideAllowNewsletters')) el('overrideAllowNewsletters').checked = true;
+    if(el('overrideAllowBroadcasts')) el('overrideAllowBroadcasts').checked = true;
     if(el('overrideBlockMedia')) el('overrideBlockMedia').checked = true;
     if(el('overrideRateEnabled')) el('overrideRateEnabled').checked = true;
     if(el('overrideRateMaxPerMinute')) el('overrideRateMaxPerMinute').value = '12';
@@ -2259,6 +2283,8 @@ function applyOverrideToForm(oRaw){
 
   if(el('overrideAllowDM')) el('overrideAllowDM').checked = o.safety?.allowDM !== false;
   if(el('overrideAllowGroups')) el('overrideAllowGroups').checked = o.safety?.allowGroups !== false;
+  if(el('overrideAllowNewsletters')) el('overrideAllowNewsletters').checked = o.safety?.allowNewsletters !== false;
+  if(el('overrideAllowBroadcasts')) el('overrideAllowBroadcasts').checked = o.safety?.allowBroadcasts !== false;
   if(el('overrideBlockMedia')) el('overrideBlockMedia').checked = o.safety?.blockMedia !== false;
 
   if(el('overrideRateEnabled')) el('overrideRateEnabled').checked = o.rateLimit?.enabled !== false;
@@ -2529,7 +2555,8 @@ function updateEffectivePreview(){
     return;
   }
 
-  const isGroup = jid.endsWith('@g.us');
+  const chatKind = chatKindFromJid(jid);
+  const isGroup = chatKind === 'group';
   const sample = String(el('autoPreviewSample')?.value || '!bot help').trim();
 
   // Build effective rule (global + override if exists and custom)
@@ -2572,18 +2599,32 @@ function updateEffectivePreview(){
   }
 
   // Safety gates
-  if(!isGroup && eff.safety?.allowDM === false){
+  if(chatKind === 'dm' && eff.safety?.allowDM === false){
     decisionEl.textContent = 'Forward to n8n: NO';
     badgeEl.className = 'badge failed';
     badgeEl.textContent = 'NO';
     reasonEl.textContent = 'Blocked by safety: Allow DMs is OFF.';
     return;
   }
-  if(isGroup && eff.safety?.allowGroups === false){
+  if(chatKind === 'group' && eff.safety?.allowGroups === false){
     decisionEl.textContent = 'Forward to n8n: NO';
     badgeEl.className = 'badge failed';
     badgeEl.textContent = 'NO';
     reasonEl.textContent = 'Blocked by safety: Allow groups is OFF.';
+    return;
+  }
+  if(chatKind === 'newsletter' && eff.safety?.allowNewsletters === false){
+    decisionEl.textContent = 'Forward to n8n: NO';
+    badgeEl.className = 'badge failed';
+    badgeEl.textContent = 'NO';
+    reasonEl.textContent = 'Blocked by safety: Allow newsletters is OFF.';
+    return;
+  }
+  if(chatKind === 'broadcast' && eff.safety?.allowBroadcasts === false){
+    decisionEl.textContent = 'Forward to n8n: NO';
+    badgeEl.className = 'badge failed';
+    badgeEl.textContent = 'NO';
+    reasonEl.textContent = 'Blocked by safety: Allow broadcasts is OFF.';
     return;
   }
 

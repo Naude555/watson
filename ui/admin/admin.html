@@ -321,12 +321,12 @@
       </div>
 
       <div class="card">
-        <div style="font-weight:900;font-size:16px;margin-bottom:6px">Group Aliases</div>
-        <div class="small">Alias lets you send reliably without relying on WhatsApp subject matching.</div>
+        <div style="font-weight:900;font-size:16px;margin-bottom:6px">Target Aliases (Groups/Channels/Broadcast)</div>
+        <div class="small">Alias lets you send reliably without relying on subject matching. Supports @g.us, @newsletter, and @broadcast JIDs.</div>
 
         <div class="row" style="margin-top:10px">
-          <input id="gName" class="grow" placeholder="Alias name (e.g. Ops Team)"/>
-          <input id="gJid" class="grow3" placeholder="Group JID (ends with @g.us)"/>
+          <input id="gName" class="grow" placeholder="Alias name (e.g. Ops Team / Status / News)"/>
+          <input id="gJid" class="grow3" placeholder="Target JID (@g.us / @newsletter / @broadcast)"/>
           <button class="btnPrimary" onclick="upsertGroup()">Save</button>
         </div>
 
@@ -337,7 +337,7 @@
 
         <div style="margin-top:12px;overflow:auto">
           <table id="groupsTable">
-            <thead><tr><th>Alias</th><th>Group JID</th><th></th></tr></thead>
+            <thead><tr><th>Alias</th><th>Target JID</th><th></th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
@@ -424,7 +424,7 @@
       <div class="row" style="justify-content:space-between;align-items:flex-start;gap:12px">
         <div>
           <div style="font-weight:900;font-size:16px">Response Rules</div>
-          <div class="small">Create text and voice-note auto replies without restarting the service. Voice-note rules can target DMs, groups, or both.</div>
+          <div class="small">Create text and voice-note auto replies without restarting the service. Rules can target DM, groups, newsletters, and broadcasts.</div>
         </div>
         <div class="row" style="align-items:flex-end">
           <button class="btnGhost" type="button" id="btnRulesReload">Reload</button>
@@ -478,9 +478,11 @@
               <div class="grow">
                 <label>Scope</label>
                 <select id="ruleScope">
-                  <option value="both">DM + Group</option>
+                  <option value="both">All chats</option>
                   <option value="dm">DM only</option>
                   <option value="group">Group only</option>
+                  <option value="newsletter">Newsletter only</option>
+                  <option value="broadcast">Broadcast only</option>
                 </select>
               </div>
             </div>
@@ -596,6 +598,8 @@
             <div class="safetyGrid">
                 <label class="row"><input type="checkbox" id="globalAllowDM" checked> <span>Allow DMs</span></label>
                 <label class="row"><input type="checkbox" id="globalAllowGroups" checked> <span>Allow groups</span></label>
+                <label class="row"><input type="checkbox" id="globalAllowNewsletters" checked> <span>Allow newsletters</span></label>
+                <label class="row"><input type="checkbox" id="globalAllowBroadcasts" checked> <span>Allow broadcasts</span></label>
                 <label class="row"><input type="checkbox" id="globalBlockMedia" checked> <span>Block media forwarding</span></label>
             </div>
           </div>
@@ -711,6 +715,8 @@
               <div class="safetyGrid">
                 <label class="row"><input type="checkbox" id="overrideAllowDM" checked> <span>Allow DMs</span></label>
                 <label class="row"><input type="checkbox" id="overrideAllowGroups" checked> <span>Allow groups</span></label>
+                <label class="row"><input type="checkbox" id="overrideAllowNewsletters" checked> <span>Allow newsletters</span></label>
+                <label class="row"><input type="checkbox" id="overrideAllowBroadcasts" checked> <span>Allow broadcasts</span></label>
                 <label class="row"><input type="checkbox" id="overrideBlockMedia" checked> <span>Block media forwarding</span></label>
               </div>
             </div>
