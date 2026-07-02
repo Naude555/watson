@@ -2857,10 +2857,129 @@ async function leaveGroup() {
 }
 
 // RULES
+let ruleConditionsDraft = [];
+
+function defaultRuleConditionV2(matchType = 'contains', matchValue = '') {
+  return {
+    id: `rule_cond_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    matchType,
+    matchValue
+  };
+}
+
+function normalizeRuleConditionsV2(conditions, fallbackType = 'contains', fallbackValue = '', options = {}) {
+  const keepEmpty = Boolean(options && options.keepEmpty);
+  const allowed = new Set(['any', 'contains', 'equals', 'startswith', 'regex']);
+  const rows = (Array.isArray(conditions) ? conditions : [])
+    .map(c => ({
+      id: String(c?.id || defaultRuleConditionV2().id),
+      matchType: allowed.has(String(c?.matchType || '')) ? String(c.matchType) : 'contains',
+      matchValue: String(c?.matchValue || '').trim()
+    }))
+    .filter(c => keepEmpty || c.matchType === 'any' || c.matchValue);
+
+  if (rows.length) return rows;
+  if (fallbackType && fallbackType !== 'any' && String(fallbackValue || '').trim()) {
+    return [defaultRuleConditionV2(fallbackType, String(fallbackValue || '').trim())];
+  }
+  return [defaultRuleConditionV2('contains', '')];
+}
+
+function ruleConditionLabelV2(c) {
+  if (!c || c.matchType === 'any') return 'Any message';
+  return `${c.matchType}: ${String(c.matchValue || '')}`;
+}
+
+function ruleConditionsSummaryV2(rule) {
+  const conditions = normalizeRuleConditionsV2(rule?.conditions, rule?.matchType, rule?.matchValue);
+  const logic = String(rule?.conditionLogic || 'and') === 'or' ? 'OR' : 'AND';
+  if (conditions.length === 1) return ruleConditionLabelV2(conditions[0]);
+  return `${conditions.length} conditions (${logic})`;
+}
+
+function renderRuleConditionsList() {
+  const host = document.getElementById('ruleConditionsList');
+  if (!host) return;
+
+  const trigger = document.getElementById('ruleTrigger')?.value || 'text';
+  if (trigger === 'voice_note') {
+    ruleConditionsDraft = [defaultRuleConditionV2('any', '')];
+  } else {
+    ruleConditionsDraft = normalizeRuleConditionsV2(ruleConditionsDraft, 'contains', '', { keepEmpty: true });
+  }
+
+  host.innerHTML = '';
+
+  ruleConditionsDraft.forEach((cond, index) => {
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.style.marginTop = '0';
+    row.style.alignItems = 'center';
+
+    const type = document.createElement('select');
+    type.style.maxWidth = '180px';
+    type.innerHTML = `
+      <option value="any">Any message</option>
+      <option value="contains">Contains</option>
+      <option value="startswith">Starts With</option>
+      <option value="equals">Exact Match</option>
+      <option value="regex">Regular Expression</option>`;
+    type.value = cond.matchType;
+    type.disabled = trigger === 'voice_note';
+    type.onchange = () => {
+      ruleConditionsDraft[index].matchType = type.value;
+      if (type.value === 'any') ruleConditionsDraft[index].matchValue = '';
+      renderRuleConditionsList();
+    };
+
+    const value = document.createElement('input');
+    value.placeholder = cond.matchType === 'regex' ? 'e.g. ^help|support$' : 'e.g. help';
+    value.value = cond.matchValue || '';
+    value.disabled = trigger === 'voice_note' || cond.matchType === 'any';
+    value.oninput = () => {
+      ruleConditionsDraft[index].matchValue = value.value;
+    };
+
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'btn-danger';
+    remove.textContent = 'Remove';
+    remove.disabled = trigger === 'voice_note' || ruleConditionsDraft.length <= 1;
+    remove.onclick = () => {
+      ruleConditionsDraft = ruleConditionsDraft.filter((_, i) => i !== index);
+      if (!ruleConditionsDraft.length) ruleConditionsDraft = [defaultRuleConditionV2('contains', '')];
+      renderRuleConditionsList();
+    };
+
+    row.appendChild(type);
+    row.appendChild(value);
+    row.appendChild(remove);
+    host.appendChild(row);
+  });
+}
+
+function addRuleConditionRow() {
+  const trigger = document.getElementById('ruleTrigger')?.value || 'text';
+  if (trigger === 'voice_note') return;
+  ruleConditionsDraft = normalizeRuleConditionsV2(ruleConditionsDraft, 'contains', '', { keepEmpty: true });
+  ruleConditionsDraft.push(defaultRuleConditionV2('contains', ''));
+  renderRuleConditionsList();
+}
+
 function updateRuleMatchDisplay() {
-  const match = document.getElementById('ruleMatch').value;
-  const box = document.getElementById('ruleKeywordBox');
-  box.style.display = match === 'any' ? 'none' : 'block';
+  const trigger = document.getElementById('ruleTrigger')?.value || 'text';
+  const logic = document.getElementById('ruleConditionLogic');
+  const addBtn = document.querySelector('#panelRules button[onclick="addRuleConditionRow()"]');
+  if (trigger === 'voice_note') {
+    if (logic) logic.disabled = true;
+    if (addBtn) addBtn.disabled = true;
+    ruleConditionsDraft = [defaultRuleConditionV2('any', '')];
+  } else {
+    if (logic) logic.disabled = false;
+    if (addBtn) addBtn.disabled = false;
+    ruleConditionsDraft = normalizeRuleConditionsV2(ruleConditionsDraft, 'contains', '', { keepEmpty: true });
+  }
+  renderRuleConditionsList();
 }
 
 function getRuleCooldownMsFromForm() {
@@ -3093,8 +3212,8 @@ function resetRuleForm() {
   document.getElementById('ruleDmFilterSearch').value = '';
   ruleDmFilterSenders = [];
   renderRuleDmFilterChips();
-  document.getElementById('ruleMatch').value = 'contains';
-  document.getElementById('ruleKeyword').value = '';
+  document.getElementById('ruleConditionLogic').value = 'and';
+  ruleConditionsDraft = [defaultRuleConditionV2('contains', '')];
   document.getElementById('ruleReply').value = '';
   setRuleCooldownFormValue(30000);
   document.getElementById('ruleFormMode').textContent = 'Creating a new rule';
@@ -3113,8 +3232,8 @@ function editRule(id) {
   document.getElementById('ruleDmFilterMode').value = rule.dmFilterMode || 'all';
   document.getElementById('ruleDmFilterSearch').value = '';
   setRuleDmFilterManualValues(Array.isArray(rule.dmFilterValues) ? rule.dmFilterValues : []);
-  document.getElementById('ruleMatch').value = rule.matchType || 'contains';
-  document.getElementById('ruleKeyword').value = rule.matchValue || '';
+  document.getElementById('ruleConditionLogic').value = rule.conditionLogic === 'or' ? 'or' : 'and';
+  ruleConditionsDraft = normalizeRuleConditionsV2(rule.conditions, rule.matchType, rule.matchValue, { keepEmpty: true });
   document.getElementById('ruleReply').value = rule.replyText || '';
   setRuleCooldownFormValue(rule.cooldownMs ?? 30000);
   document.getElementById('ruleFormMode').textContent = `Editing rule: ${rule.name || rule.id}`;
@@ -3147,9 +3266,10 @@ function renderRulesList() {
       ? `DM include: ${dmLabels.length ? dmLabels.join(', ') : '(none)'}`
       : (dmMode === 'exclude' ? `DM exclude: ${dmLabels.length ? dmLabels.join(', ') : '(none)'}` : 'DM all');
     const cooldownSummary = `Cooldown: ${formatRuleCooldown(r.cooldownMs)}`;
+    const scopeSummary = r.scope === 'dm' ? 'DM' : r.scope === 'group' ? 'Group' : r.scope === 'newsletter' ? 'Newsletter' : r.scope === 'broadcast' ? 'Broadcast' : 'All';
     const item = document.createElement('div');
     item.className = 'list-item';
-    item.innerHTML = `<div class="list-item-text"><div class="list-item-main">${r.triggerType}: "${esc(r.matchValue || 'any')}"</div><div class="list-item-sub">${esc(dmSummary)} • ${esc(cooldownSummary)} • → ${esc(r.replyText.slice(0, 50))}</div></div>`;
+    item.innerHTML = `<div class="list-item-text"><div class="list-item-main">${esc(r.triggerType)} • ${esc(scopeSummary)} • ${esc(ruleConditionsSummaryV2(r))}</div><div class="list-item-sub">${esc(dmSummary)} • ${esc(cooldownSummary)} • → ${esc(r.replyText.slice(0, 50))}</div></div>`;
     
     const del = document.createElement('button');
     del.className = 'btn-danger';
@@ -3172,12 +3292,32 @@ async function saveRule() {
   const scope = document.getElementById('ruleScope').value;
   const dmFilterMode = document.getElementById('ruleDmFilterMode').value;
   const dmFilterValues = getRuleDmFilterManualValues();
-  const match = document.getElementById('ruleMatch').value;
-  const keyword = document.getElementById('ruleKeyword').value.trim();
+  const conditionLogic = document.getElementById('ruleConditionLogic').value === 'or' ? 'or' : 'and';
+  let conditions = trigger === 'voice_note'
+    ? [defaultRuleConditionV2('any', '')]
+    : normalizeRuleConditionsV2(ruleConditionsDraft)
+        .map(c => ({
+          id: c.id,
+          matchType: c.matchType,
+          matchValue: c.matchType === 'any' ? '' : String(c.matchValue || '').trim()
+        }));
   const reply = document.getElementById('ruleReply').value.trim();
   const cooldownMs = getRuleCooldownMsFromForm();
   const id = document.getElementById('ruleId').value.trim();
   const enabled = document.getElementById('ruleEnabled').value !== 'false';
+
+  if (trigger !== 'voice_note') {
+    for (const c of conditions) {
+      if (c.matchType !== 'any' && !c.matchValue) {
+        toast('Every non-Any condition needs a value', false);
+        return;
+      }
+    }
+  }
+
+  const primary = conditions[0] || { matchType: 'any', matchValue: '' };
+  const match = primary.matchType;
+  const keyword = primary.matchValue;
   
   if (!reply) {
     toast('Enter reply text', false);
@@ -3193,6 +3333,8 @@ async function saveRule() {
         triggerType: trigger,
         matchType: match,
         matchValue: keyword,
+        conditionLogic,
+        conditions,
         scope,
         dmFilterMode,
         dmFilterValues,
@@ -4021,6 +4163,105 @@ init();
 let webhookRulesData = [];
 let editingWebhookRuleId = null;
 let webhookDmFilterManualValues = [];
+let webhookConditionsDraft = [];
+
+function defaultWebhookConditionV2(matchType = 'any', matchValue = '') {
+  return {
+    id: `cond_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    matchType,
+    matchValue
+  };
+}
+
+function normalizeWebhookConditionsV2(conditions, fallbackType = 'any', fallbackValue = '', options = {}) {
+  const keepEmpty = Boolean(options && options.keepEmpty);
+  const allowed = new Set(['any', 'contains', 'equals', 'startswith', 'regex']);
+  const rows = (Array.isArray(conditions) ? conditions : [])
+    .map(c => ({
+      id: String(c?.id || defaultWebhookConditionV2().id),
+      matchType: allowed.has(String(c?.matchType || '')) ? String(c.matchType) : 'any',
+      matchValue: String(c?.matchValue || '').trim()
+    }))
+    .filter(c => keepEmpty || c.matchType === 'any' || c.matchValue);
+
+  if (rows.length) return rows;
+  if (fallbackType && fallbackType !== 'any' && String(fallbackValue || '').trim()) {
+    return [defaultWebhookConditionV2(fallbackType, String(fallbackValue || '').trim())];
+  }
+  return [defaultWebhookConditionV2('contains', '')];
+}
+
+function webhookConditionLabelV2(c) {
+  if (!c || c.matchType === 'any') return 'Any message';
+  return `${c.matchType}: ${String(c.matchValue || '')}`;
+}
+
+function webhookConditionsSummaryV2(rule) {
+  const conditions = normalizeWebhookConditionsV2(rule?.conditions, rule?.matchType, rule?.matchValue);
+  const logic = String(rule?.conditionLogic || 'and') === 'or' ? 'OR' : 'AND';
+  if (conditions.length === 1) return webhookConditionLabelV2(conditions[0]);
+  return `${conditions.length} conditions (${logic})`;
+}
+
+function renderWebhookConditionsList() {
+  const host = document.getElementById('webhookConditionsList');
+  if (!host) return;
+
+  webhookConditionsDraft = normalizeWebhookConditionsV2(webhookConditionsDraft, 'contains', '', { keepEmpty: true });
+  host.innerHTML = '';
+
+  webhookConditionsDraft.forEach((cond, index) => {
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.style.marginTop = '0';
+    row.style.alignItems = 'center';
+
+    const type = document.createElement('select');
+    type.style.maxWidth = '180px';
+    type.innerHTML = `
+      <option value="any">Any message</option>
+      <option value="contains">Contains</option>
+      <option value="startswith">Starts With</option>
+      <option value="equals">Exact Match</option>
+      <option value="regex">Regular Expression</option>`;
+    type.value = cond.matchType;
+    type.onchange = () => {
+      webhookConditionsDraft[index].matchType = type.value;
+      if (type.value === 'any') webhookConditionsDraft[index].matchValue = '';
+      renderWebhookConditionsList();
+    };
+
+    const value = document.createElement('input');
+    value.placeholder = cond.matchType === 'regex' ? 'e.g. ^order\\s+#?\\d+$' : 'e.g. urgent';
+    value.value = cond.matchValue || '';
+    value.disabled = cond.matchType === 'any';
+    value.oninput = () => {
+      webhookConditionsDraft[index].matchValue = value.value;
+    };
+
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'btn-danger';
+    remove.textContent = 'Remove';
+    remove.disabled = webhookConditionsDraft.length <= 1;
+    remove.onclick = () => {
+      webhookConditionsDraft = webhookConditionsDraft.filter((_, i) => i !== index);
+      if (!webhookConditionsDraft.length) webhookConditionsDraft = [defaultWebhookConditionV2('any', '')];
+      renderWebhookConditionsList();
+    };
+
+    row.appendChild(type);
+    row.appendChild(value);
+    row.appendChild(remove);
+    host.appendChild(row);
+  });
+}
+
+function addWebhookConditionRow() {
+  webhookConditionsDraft = normalizeWebhookConditionsV2(webhookConditionsDraft, 'contains', '', { keepEmpty: true });
+  webhookConditionsDraft.push(defaultWebhookConditionV2('contains', ''));
+  renderWebhookConditionsList();
+}
 
 function resetWebhookRuleForm() {
   editingWebhookRuleId = null;
@@ -4034,16 +4275,11 @@ function resetWebhookRuleForm() {
   document.getElementById('webhookDmFilterMode').value = 'all';
   document.getElementById('webhookDmFilterSearch').value = '';
   setWebhookDmFilterManualValues([]);
-  document.getElementById('webhookMatch').value = 'any';
-  document.getElementById('webhookKeyword').value = '';
+  document.getElementById('webhookConditionLogic').value = 'and';
+  webhookConditionsDraft = [defaultWebhookConditionV2('contains', '')];
   document.getElementById('webhookFormMode').textContent = 'Creating a new webhook rule';
   updateWebhookDmFilterDisplay();
-  updateWebhookMatchDisplay();
-}
-
-function updateWebhookMatchDisplay() {
-  const val = document.getElementById('webhookMatch').value;
-  document.getElementById('webhookKeywordBox').style.display = val === 'any' ? 'none' : '';
+  renderWebhookConditionsList();
 }
 
 function updateWebhookDmFilterDisplay() {
@@ -4153,8 +4389,16 @@ function renderWebhookRulesList() {
   }
   for (const r of webhookRulesData) {
     const dirLabel = r.direction === 'inbound' ? '← In' : r.direction === 'outbound' ? '→ Out' : '⇄ Both';
-    const scopeLabel = r.scope === 'dm' ? 'DM' : r.scope === 'group' ? 'Group' : 'Any';
-    const matchLabel = r.matchType === 'any' ? 'any msg' : `${r.matchType}: "${r.matchValue || ''}"`;
+    const scopeLabel = r.scope === 'dm'
+      ? 'DM'
+      : r.scope === 'group'
+        ? 'Group'
+        : r.scope === 'newsletter'
+          ? 'Newsletter'
+          : r.scope === 'broadcast'
+            ? 'Broadcast'
+            : 'Any';
+    const matchLabel = webhookConditionsSummaryV2(r);
     const statusDot = r.enabled ? '🟢' : '🔴';
     const shortUrl = (r.url || '').replace(/^https?:\/\//, '').slice(0, 50);
 
@@ -4197,11 +4441,11 @@ function editWebhookRule(id) {
   document.getElementById('webhookDmFilterMode').value = rule.dmFilterMode || 'all';
   document.getElementById('webhookDmFilterSearch').value = '';
   setWebhookDmFilterManualValues(Array.isArray(rule.dmFilterValues) ? rule.dmFilterValues : []);
-  document.getElementById('webhookMatch').value = rule.matchType || 'any';
-  document.getElementById('webhookKeyword').value = rule.matchValue || '';
+  document.getElementById('webhookConditionLogic').value = rule.conditionLogic === 'or' ? 'or' : 'and';
+  webhookConditionsDraft = normalizeWebhookConditionsV2(rule.conditions, rule.matchType, rule.matchValue, { keepEmpty: true });
   document.getElementById('webhookFormMode').textContent = `Editing: ${rule.name || rule.id}`;
   updateWebhookDmFilterDisplay();
-  updateWebhookMatchDisplay();
+  renderWebhookConditionsList();
 }
 
 async function saveWebhookRule() {
@@ -4216,11 +4460,27 @@ async function saveWebhookRule() {
   const scope = document.getElementById('webhookScope').value;
   const dmFilterMode = document.getElementById('webhookDmFilterMode').value;
   const dmFilterValues = [...webhookDmFilterManualValues];
-  const matchType = document.getElementById('webhookMatch').value;
-  const matchValue = document.getElementById('webhookKeyword').value.trim();
+  const conditionLogic = document.getElementById('webhookConditionLogic').value === 'or' ? 'or' : 'and';
+  const conditions = normalizeWebhookConditionsV2(webhookConditionsDraft)
+    .map(c => ({
+      id: c.id,
+      matchType: c.matchType,
+      matchValue: c.matchType === 'any' ? '' : String(c.matchValue || '').trim()
+    }));
+
+  for (const c of conditions) {
+    if (c.matchType !== 'any' && !c.matchValue) {
+      toast('Every non-Any condition needs a value', false);
+      return;
+    }
+  }
+
+  const primary = conditions[0] || { matchType: 'any', matchValue: '' };
+  const matchType = primary.matchType;
+  const matchValue = primary.matchValue;
 
   const body = { id: id || undefined, name, enabled, url, direction, scope,
-    dmFilterMode, dmFilterValues, matchType, matchValue };
+    dmFilterMode, dmFilterValues, conditionLogic, conditions, matchType, matchValue };
 
   // Only send sharedSecret if user typed something (blank = keep existing / use global)
   if (sharedSecret) body.sharedSecret = sharedSecret;

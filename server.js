@@ -1918,7 +1918,8 @@ async function getDependencyHealthSnapshot() {
 function normalizeResponseRule(input = {}, existing = null) {
   const triggerType = ['text', 'voice_note'].includes(input.triggerType) ? input.triggerType : (existing?.triggerType || 'text')
   const scope = ['dm', 'group', 'newsletter', 'broadcast', 'both'].includes(input.scope) ? input.scope : (existing?.scope || 'both')
-  const matchType = ['contains', 'equals', 'regex', 'any'].includes(input.matchType) ? input.matchType : (existing?.matchType || (triggerType === 'voice_note' ? 'any' : 'contains'))
+  const matchType = ['contains', 'equals', 'regex', 'any', 'startswith'].includes(input.matchType) ? input.matchType : (existing?.matchType || (triggerType === 'voice_note' ? 'any' : 'contains'))
+  const conditionLogic = ['and', 'or'].includes(input.conditionLogic) ? input.conditionLogic : (existing?.conditionLogic || 'and')
   const dmFilterMode = ['all', 'include', 'exclude'].includes(input.dmFilterMode)
     ? input.dmFilterMode
     : (['all', 'include', 'exclude'].includes(existing?.dmFilterMode) ? existing.dmFilterMode : 'all')
@@ -1930,6 +1931,13 @@ function normalizeResponseRule(input = {}, existing = null) {
   const groupPrefix = String(input.groupPrefix ?? existing?.groupPrefix ?? autoReplyCfg.groupPrefix).trim()
   const replyText = String(input.replyText ?? existing?.replyText ?? '').trim()
   const cooldownMs = Math.max(0, Number(input.cooldownMs ?? existing?.cooldownMs ?? autoReplyCfg.cooldownMs) || 0)
+  const matchValue = String(input.matchValue ?? existing?.matchValue ?? '').trim()
+  const conditions = normalizeResponseConditions(
+    input.conditions !== undefined ? input.conditions : existing?.conditions,
+    matchType,
+    matchValue
+  )
+  const primary = conditions[0] || { matchType: triggerType === 'voice_note' ? 'any' : 'contains', matchValue: '' }
 
   return {
     id: String(input.id || existing?.id || makeId('rule')),
@@ -1937,8 +1945,10 @@ function normalizeResponseRule(input = {}, existing = null) {
     enabled: input.enabled === undefined ? (existing?.enabled !== false) : Boolean(input.enabled),
     triggerType,
     scope,
-    matchType,
-    matchValue: String(input.matchValue ?? existing?.matchValue ?? '').trim(),
+    matchType: primary.matchType,
+    matchValue: primary.matchValue,
+    conditionLogic,
+    conditions,
     dmFilterMode,
     dmFilterValues,
     requirePrefix: input.requirePrefix === undefined ? Boolean(existing?.requirePrefix) : Boolean(input.requirePrefix),
@@ -1953,8 +1963,13 @@ function normalizeResponseRule(input = {}, existing = null) {
 function validateResponseRule(rule) {
   if (!rule.name) throw new Error('Rule name required')
   if (!rule.replyText) throw new Error('Reply text required')
-  if (rule.triggerType === 'text' && rule.matchType !== 'any' && !String(rule.matchValue || '').trim()) {
-    throw new Error('Match value required for text rules')
+  if (rule.triggerType === 'text') {
+    const conditions = normalizeResponseConditions(rule.conditions, rule.matchType, rule.matchValue)
+    for (const condition of conditions) {
+      if (condition.matchType !== 'any' && !String(condition.matchValue || '').trim()) {
+        throw new Error('Match value required for text rules')
+      }
+    }
   }
   return rule
 }
@@ -2715,10 +2730,44 @@ function matchValueByType(text, matchType, matchValue) {
   if (!t || !v) return false
   if (matchType === 'equals') return t.toLowerCase() === v.toLowerCase()
   if (matchType === 'contains') return t.toLowerCase().includes(v.toLowerCase())
+  if (matchType === 'startswith') return t.toLowerCase().startsWith(v.toLowerCase())
   if (matchType === 'regex') {
     try { return new RegExp(v, 'i').test(t) } catch { return false }
   }
   return false
+}
+
+function normalizeResponseCondition(input, fallback) {
+  const src = input && typeof input === 'object' ? input : {}
+  const ext = fallback && typeof fallback === 'object' ? fallback : {}
+  const allowed = ['any', 'contains', 'equals', 'regex', 'startswith']
+  const matchType = allowed.includes(String(src.matchType || ''))
+    ? String(src.matchType)
+    : (allowed.includes(String(ext.matchType || '')) ? String(ext.matchType) : 'contains')
+  const matchValue = String(src.matchValue !== undefined ? src.matchValue : (ext.matchValue || '')).trim()
+  return {
+    id: String(src.id || ext.id || '').trim() || makeId('rulec'),
+    matchType,
+    matchValue: matchType === 'any' ? '' : matchValue
+  }
+}
+
+function normalizeResponseConditions(rawConditions, fallbackMatchType, fallbackMatchValue) {
+  const list = Array.isArray(rawConditions) ? rawConditions : []
+  let out = list
+    .map(c => normalizeResponseCondition(c, null))
+    .filter(c => c.matchType === 'any' || c.matchValue)
+
+  if (!out.length) {
+    const fallback = normalizeResponseCondition({
+      matchType: fallbackMatchType,
+      matchValue: fallbackMatchValue
+    }, null)
+    if (fallback.matchType === 'any' || fallback.matchValue) out = [fallback]
+  }
+
+  if (!out.length) out = [normalizeResponseCondition({ matchType: 'contains', matchValue: '' }, null)]
+  return out
 }
 
 function ruleScopeMatches(rule, inbound = {}) {
@@ -2815,7 +2864,12 @@ function findMatchingResponseRule(inbound) {
         if (!candidateText && rule.matchType !== 'any') continue
       }
 
-      if (!matchValueByType(candidateText, rule.matchType, rule.matchValue)) continue
+      const conditions = normalizeResponseConditions(rule.conditions, rule.matchType, rule.matchValue)
+      const logic = ['and', 'or'].includes(String(rule.conditionLogic || '')) ? String(rule.conditionLogic) : 'and'
+      const matched = logic === 'or'
+        ? conditions.some(condition => matchValueByType(candidateText, condition.matchType, condition.matchValue))
+        : conditions.every(condition => matchValueByType(candidateText, condition.matchType, condition.matchValue))
+      if (!matched) continue
     }
 
     const cooldownKey = `${rule.id}:${inbound.chatJid}`

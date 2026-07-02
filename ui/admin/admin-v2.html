@@ -1641,9 +1641,11 @@
 
             <div class="label" style="margin-top: 8px;">Scope</div>
             <select id="ruleScope">
-              <option value="both">Both</option>
+              <option value="both">All chats</option>
               <option value="dm">DM only</option>
               <option value="group">Group only</option>
+              <option value="newsletter">Newsletter only</option>
+              <option value="broadcast">Broadcast only</option>
             </select>
 
             <div class="label" style="margin-top: 8px;">DM Sender Filter</div>
@@ -1665,17 +1667,16 @@
               <div id="ruleDmFilterChips" class="recipient-chips" style="min-height:38px;padding:6px 8px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:8px;align-content:flex-start;"></div>
             </div>
             
-            <div class="label" style="margin-top: 8px;">Match Mode</div>
-            <select id="ruleMatch" onchange="updateRuleMatchDisplay()">
-              <option value="contains">Contains (any case)</option>
-              <option value="equals">Exact Match</option>
-              <option value="regex">Regular Expression</option>
-              <option value="any">Any (for voice notes)</option>
+            <div class="label" style="margin-top: 8px;">Condition Logic</div>
+            <select id="ruleConditionLogic">
+              <option value="and">AND (all conditions must match)</option>
+              <option value="or">OR (any condition can match)</option>
             </select>
-            
-            <div id="ruleKeywordBox">
-              <div class="label" style="margin-top: 8px;">Keyword / Pattern</div>
-              <input id="ruleKeyword" placeholder="e.g., help" />
+
+            <div class="label" style="margin-top: 8px;">Match Conditions</div>
+            <div id="ruleConditionsList" style="display:flex;flex-direction:column;gap:8px;"></div>
+            <div class="row" style="margin-top: 8px;">
+              <button class="btn-ghost" type="button" onclick="addRuleConditionRow()">Add Condition</button>
             </div>
             
             <div class="label" style="margin-top: 8px;">Auto Reply</div>
@@ -1735,9 +1736,11 @@
 
               <div class="label" style="margin-top: 8px;">Scope</div>
               <select id="webhookScope">
-                <option value="both">Both (DMs &amp; groups)</option>
+                <option value="both">All chats (DMs, groups, newsletters, broadcasts)</option>
                 <option value="dm">DM only</option>
                 <option value="group">Group only</option>
+                <option value="newsletter">Newsletter only</option>
+                <option value="broadcast">Broadcast only</option>
               </select>
 
               <div class="label" style="margin-top: 8px;">DM Sender Filter</div>
@@ -1759,18 +1762,16 @@
                 <div id="webhookDmFilterChips" class="recipient-chips" style="min-height:38px;padding:6px 8px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:8px;align-content:flex-start;"></div>
               </div>
 
-              <div class="label" style="margin-top: 8px;">Match Mode</div>
-              <select id="webhookMatch" onchange="updateWebhookMatchDisplay()">
-                <option value="any">Any message (no filter)</option>
-                <option value="contains">Contains (any case)</option>
-                <option value="startswith">Starts With</option>
-                <option value="equals">Exact Match</option>
-                <option value="regex">Regular Expression</option>
+              <div class="label" style="margin-top: 8px;">Condition Logic</div>
+              <select id="webhookConditionLogic">
+                <option value="and">AND (all conditions must match)</option>
+                <option value="or">OR (any condition can match)</option>
               </select>
 
-              <div id="webhookKeywordBox" style="display:none;">
-                <div class="label" style="margin-top: 8px;">Keyword / Pattern</div>
-                <input id="webhookKeyword" placeholder="e.g., urgent" />
+              <div class="label" style="margin-top: 8px;">Match Conditions</div>
+              <div id="webhookConditionsList" style="display:flex;flex-direction:column;gap:8px;"></div>
+              <div class="row" style="margin-top: 8px;">
+                <button class="btn-ghost" type="button" onclick="addWebhookConditionRow()">Add Condition</button>
               </div>
 
               <div class="row" style="margin-top: 12px;">
