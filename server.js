@@ -1134,7 +1134,7 @@ async function readAuthCredsFromDb() {
   const raw = await readKvFromDb(AUTH_CREDS_DB_KEY, null)
   if (!raw || typeof raw !== 'object') return null
   try {
-    return JSON.parse(JSON.stringify(raw), BufferJSON.reviver)
+    return JSON.parse(JSON.stringify(raw), authBufferJsonReviver)
   } catch {
     return null
   }
@@ -1149,10 +1149,28 @@ async function writeAuthCredsToDb(creds) {
 function reviveBufferJson(value, fallback = null) {
   if (value == null) return fallback
   try {
-    return JSON.parse(JSON.stringify(value), BufferJSON.reviver)
+    return JSON.parse(JSON.stringify(value), authBufferJsonReviver)
   } catch {
     return fallback
   }
+}
+
+// Baileys 6 and older Node serializers stored buffers as
+// { type: 'Buffer', data: number[] }. Baileys 7's BufferJSON reviver expects
+// the data field to be base64, so credentials persisted before the upgrade
+// would otherwise remain plain objects. In particular, routingInfo.byteLength
+// becomes undefined and Baileys tries to allocate a NaN-sized Noise frame.
+function authBufferJsonReviver(key, value) {
+  if (
+    value &&
+    typeof value === 'object' &&
+    value.type === 'Buffer' &&
+    Array.isArray(value.data) &&
+    value.data.every(byte => Number.isInteger(byte) && byte >= 0 && byte <= 255)
+  ) {
+    return Buffer.from(value.data)
+  }
+  return BufferJSON.reviver(key, value)
 }
 
 async function readAuthKeysFromDb(type, ids = []) {
@@ -1171,7 +1189,7 @@ async function readAuthKeysFromDb(type, ids = []) {
         if (!row?.key_id) continue
         const val = row.value && typeof row.value === 'object'
           ? reviveBufferJson(row.value, null)
-          : (() => { try { return JSON.parse(String(row.value || '{}'), BufferJSON.reviver) } catch { return null } })()
+          : (() => { try { return JSON.parse(String(row.value || '{}'), authBufferJsonReviver) } catch { return null } })()
         if (val !== null) out[String(row.key_id)] = val
       }
     } catch (e) {
@@ -1190,7 +1208,7 @@ async function readAuthKeysFromDb(type, ids = []) {
         const keyId = String(row?.key_id || '')
         if (!keyId) continue
         try {
-          out[keyId] = JSON.parse(String(row.value || '{}'), BufferJSON.reviver)
+          out[keyId] = JSON.parse(String(row.value || '{}'), authBufferJsonReviver)
         } catch {}
       }
     } catch (e) {
@@ -1330,7 +1348,7 @@ async function preloadAuthKeysToCache() {
         if (!type || !id) continue
         const val = row.value && typeof row.value === 'object'
           ? reviveBufferJson(row.value, null)
-          : (() => { try { return JSON.parse(String(row.value || '{}'), BufferJSON.reviver) } catch { return null } })()
+          : (() => { try { return JSON.parse(String(row.value || '{}'), authBufferJsonReviver) } catch { return null } })()
         if (val !== null) {
           if (!waAuthKeysCache[type]) waAuthKeysCache[type] = {}
           waAuthKeysCache[type][id] = val
@@ -1347,7 +1365,7 @@ async function preloadAuthKeysToCache() {
         const id = String(row?.key_id || '')
         if (!type || !id) continue
         try {
-          const val = JSON.parse(String(row.value || '{}'), BufferJSON.reviver)
+          const val = JSON.parse(String(row.value || '{}'), authBufferJsonReviver)
           if (!waAuthKeysCache[type]) waAuthKeysCache[type] = {}
           waAuthKeysCache[type][id] = val
         } catch {}
@@ -9574,7 +9592,7 @@ app.listen(PORT, async () => {
     await startWhatsApp()
     startupReady = true
   } catch (e) {
-    console.error('❌ Startup failed:', e?.message || e)
+    console.error('❌ Startup failed:', e?.stack || e?.message || e)
     process.exitCode = 1
     setTimeout(() => process.exit(1), 100)
   }
