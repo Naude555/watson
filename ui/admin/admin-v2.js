@@ -2055,11 +2055,37 @@ let pairingQrRequestInFlight = false;
 let pairingLastQrRequestKey = '';
 let pairingLastQrLoadedKey = '';
 let pairingStatusState = { status: 'unknown', hasQR: false, relinking: false, qrUpdatedAt: 0 };
+let pairingQrObjectUrl = '';
 
 function setPairingQrImage(src) {
   const img = document.getElementById('qrImage');
   if (!img || !src) return;
+  if (pairingQrObjectUrl && pairingQrObjectUrl !== src) {
+    URL.revokeObjectURL(pairingQrObjectUrl);
+  }
+  pairingQrObjectUrl = String(src).startsWith('blob:') ? src : '';
   img.src = src;
+  img.style.display = 'block';
+  const placeholder = document.getElementById('qrPlaceholder');
+  if (placeholder) placeholder.style.display = 'none';
+}
+
+function clearPairingQrImage(message = 'Waiting for a fresh QR code…') {
+  const img = document.getElementById('qrImage');
+  if (pairingQrObjectUrl) {
+    URL.revokeObjectURL(pairingQrObjectUrl);
+    pairingQrObjectUrl = '';
+  }
+  if (img) {
+    img.removeAttribute('src');
+    img.style.display = 'none';
+    img.dataset.qrReady = '0';
+  }
+  const placeholder = document.getElementById('qrPlaceholder');
+  if (placeholder) {
+    placeholder.textContent = message;
+    placeholder.style.display = 'block';
+  }
 }
 
 function stopPairingQrPolling() {
@@ -2194,18 +2220,46 @@ async function refreshQr(options = {}) {
 
   pairingQrRequestInFlight = true;
   pairingLastQrRequestKey = requestKey;
-  img.onload = () => {
-    pairingQrRequestInFlight = false;
-    pairingLastQrLoadedKey = requestKey;
-    img.dataset.qrReady = '1';
-  };
-  img.onerror = () => {
+  const bust = force ? `&t=${Date.now()}` : '';
+  const qrUrl = withBase(`/admin/pairing/qr.png?v=${encodeURIComponent(requestKey)}${bust}`);
+
+  try {
+    const response = await fetch(qrUrl, {
+      method: 'GET',
+      credentials: 'same-origin',
+      cache: 'no-store',
+      headers: { Accept: 'image/png' }
+    });
+
+    if (response.status === 204) {
+      pairingQrRequestInFlight = false;
+      if (!quiet) toast('QR not ready yet', false);
+      return;
+    }
+    if (!response.ok) throw new Error(`QR request failed (${response.status})`);
+
+    const blob = await response.blob();
+    if (!blob.size || !String(blob.type || '').startsWith('image/')) {
+      throw new Error('QR response was empty');
+    }
+
+    const objectUrl = URL.createObjectURL(blob);
+    img.onload = () => {
+      pairingQrRequestInFlight = false;
+      pairingLastQrLoadedKey = requestKey;
+      img.dataset.qrReady = '1';
+    };
+    img.onerror = () => {
+      pairingQrRequestInFlight = false;
+      img.dataset.qrReady = '0';
+      clearPairingQrImage('QR image could not be displayed. Retrying…');
+    };
+    setPairingQrImage(objectUrl);
+  } catch (e) {
     pairingQrRequestInFlight = false;
     img.dataset.qrReady = '0';
-    if (!quiet) toast('QR not ready yet', false);
-  };
-  const bust = force ? `&t=${Date.now()}` : '';
-  setPairingQrImage(withBase(`/admin/pairing/qr.png?v=${encodeURIComponent(requestKey)}${bust}`));
+    if (!quiet) toast(e?.message || 'QR not ready yet', false);
+  }
 }
 
 function manualRefreshQr() {
@@ -2214,6 +2268,7 @@ function manualRefreshQr() {
     return;
   }
   if (pairingStatusState.status === 'connecting' || pairingStatusState.status === 'relinking' || pairingStatusState.relinking) {
+    startPairingQrPolling({ attempts: 30, intervalMs: 2000 });
     refreshQr({ quiet: true, force: true });
     toast('Waiting for latest QR…', true);
     return;
@@ -2231,11 +2286,13 @@ async function forceRelink(options = {}) {
 
   try {
     pairingRelinkBusy = true;
+    clearPairingQrImage('Starting a new WhatsApp pairing session…');
     const statusEl = document.getElementById('pairingStatus');
     if (statusEl) statusEl.textContent = source === 'refresh-qr'
       ? 'Status: relinking • requesting fresh QR…'
       : 'Status: relinking • waiting for QR…';
     await api('/admin/force-relink', { method: 'POST' });
+    startPairingQrPolling({ attempts: 30, intervalMs: 2000 });
     refreshQr({ quiet: true, force: true });
     if (!silentSuccess) toast('Re-pair requested', true);
   } catch (e) {

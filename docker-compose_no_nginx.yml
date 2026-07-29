@@ -4,6 +4,12 @@ services:
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 2s
     restart: unless-stopped
 
   wa-api:
@@ -19,13 +25,15 @@ services:
       - ./uploads:/app/uploads
       - ./data:/data
     healthcheck:
-      test: ["CMD-SHELL", "wget --spider --header=\"x-api-key: ${WA_API_KEY}\" http://localhost:3000/health || exit 1"]
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/health/ready"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 6
       start_period: 15s
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
+        restart: true
     restart: unless-stopped
 
 volumes:

@@ -7,7 +7,7 @@ import QRCode from 'qrcode'
 import fs from 'fs'
 import path from 'path'
 import helmet from 'helmet'
-import rateLimit from 'express-rate-limit'
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit'
 import crypto from 'crypto'
 import { fileURLToPath } from 'url'
 import BullMQ from 'bullmq'
@@ -1142,7 +1142,8 @@ async function readAuthCredsFromDb() {
 
 async function writeAuthCredsToDb(creds) {
   if (!creds || typeof creds !== 'object') return false
-  return await writeKvToDb(AUTH_CREDS_DB_KEY, creds)
+  const serialized = JSON.parse(JSON.stringify(creds, BufferJSON.replacer))
+  return await writeKvToDb(AUTH_CREDS_DB_KEY, serialized)
 }
 
 function reviveBufferJson(value, fallback = null) {
@@ -1221,7 +1222,7 @@ async function writeAuthKeysToDb(data = {}) {
             `INSERT INTO wa_auth_keys(key_type, key_id, value, updated_at)
              VALUES ($1, $2, $3::jsonb, $4)
              ON CONFLICT(key_type, key_id) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`,
-            [row.type, row.id, JSON.stringify(row.payload), Date.now()]
+            [row.type, row.id, JSON.stringify(row.payload, BufferJSON.replacer), Date.now()]
           )
         } else {
           await pgPool.query('DELETE FROM wa_auth_keys WHERE key_type = $1 AND key_id = $2', [row.type, row.id])
@@ -1246,7 +1247,7 @@ async function writeAuthKeysToDb(data = {}) {
       sqliteDb.transaction(() => {
         for (const row of entries) {
           if (!row.id) continue
-          if (row.payload) upsert.run(row.type, row.id, JSON.stringify(row.payload), ts)
+          if (row.payload) upsert.run(row.type, row.id, JSON.stringify(row.payload, BufferJSON.replacer), ts)
           else del.run(row.type, row.id)
         }
       })()
@@ -2456,10 +2457,39 @@ const redis = new IORedis(REDIS_URL, {
   maxRetriesPerRequest: null,
   enableReadyCheck: true,
 })
+redis.on('error', (err) => {
+  console.warn('⚠️ Redis connection error:', err?.message || err)
+})
 
 // Queue objects will be created lazily once we know the instance ID
 let sendQueue = null
 let queueEvents = null
+let queueEventsConn = null
+let startupReady = false
+
+async function waitForRedisReady(timeoutMs = Number(process.env.REDIS_STARTUP_TIMEOUT_MS || 60000)) {
+  if (redis.status === 'ready') return
+
+  await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup()
+      reject(new Error(`Redis was not ready within ${timeoutMs}ms`))
+    }, Math.max(1000, timeoutMs))
+
+    const onReady = () => {
+      cleanup()
+      resolve()
+    }
+
+    const cleanup = () => {
+      clearTimeout(timeout)
+      redis.off('ready', onReady)
+    }
+
+    redis.once('ready', onReady)
+    if (redis.status === 'ready') onReady()
+  })
+}
 
 // Initialize or re-initialize queue with the correct queue name
 function initializeQueue(queueName) {
@@ -2469,6 +2499,9 @@ function initializeQueue(queueName) {
   }
   if (queueEvents) {
     queueEvents.close().catch(() => {})
+  }
+  if (queueEventsConn) {
+    queueEventsConn.quit().catch(() => {})
   }
 
   sendQueue = new Queue(queueName, {
@@ -2482,11 +2515,12 @@ function initializeQueue(queueName) {
   })
 
   // QueueEvents must use its own Redis connection
-  const queueEventsConn = redis.duplicate()
+  queueEventsConn = redis.duplicate()
   queueEvents = new QueueEvents(queueName, { connection: queueEventsConn })
 
   queueEvents.on('completed', ({ jobId }) => console.log('✅ job completed', jobId))
   queueEvents.on('failed', ({ jobId, failedReason }) => console.log('❌ job failed', jobId, failedReason))
+  queueEvents.on('error', (err) => console.warn('⚠️ Queue events error:', err?.message || err))
 
   console.log(`📦 Queue initialized: ${queueName}`)
 }
@@ -3031,11 +3065,11 @@ function looksLikePhone(input) {
 
 function resolveBaileysBrowser() {
   try {
-    if (WA_BROWSER_PROFILE === 'windows' || WA_BROWSER_PROFILE === 'win') return Browsers.windows('Desktop')
+    if (WA_BROWSER_PROFILE === 'windows' || WA_BROWSER_PROFILE === 'win') return Browsers.windows('Chrome')
     if (WA_BROWSER_PROFILE === 'ubuntu' || WA_BROWSER_PROFILE === 'linux') return Browsers.ubuntu('Chrome')
-    return Browsers.macOS('Desktop')
+    return Browsers.macOS('Chrome')
   } catch {
-    return undefined
+    return Browsers.macOS('Chrome')
   }
 }
 
@@ -3424,6 +3458,59 @@ function dedupeContactsByIdentity(store) {
   return changed
 }
 
+function splitCollapsedContactAliases(store) {
+  const contacts = Array.isArray(store?.contacts) ? store.contacts : []
+  if (!contacts.length) return false
+
+  let changed = false
+  const next = []
+
+  for (const raw of contacts) {
+    const normalized = normalizeContactInput(raw || {})
+    const primaryJid = normalizeJid(normalized.jid || '')
+    const aliasJids = normalizeAliasJids(normalized.aliasJids || [], primaryJid)
+    const lidAliases = aliasJids.filter(a => a.endsWith('@lid'))
+    const hasPhoneIdentity = Boolean(
+      normalized.msisdn ||
+      primaryJid.endsWith('@s.whatsapp.net') ||
+      primaryJid.endsWith('@w.whatsapp.net')
+    )
+
+    if (!hasPhoneIdentity || lidAliases.length < 2) {
+      next.push(normalized)
+      continue
+    }
+
+    const baseName = stripAutoSuffixName(normalized.name) || String(normalized.name || '').trim() || 'Contact'
+    const retainedAliases = aliasJids.filter(a => !a.endsWith('@lid'))
+    const preferredLidAlias = lidAliases[0] || ''
+    if (preferredLidAlias) retainedAliases.push(preferredLidAlias)
+
+    next.push({
+      ...normalized,
+      aliasJids: normalizeAliasJids(retainedAliases, primaryJid)
+    })
+
+    for (const lidAlias of lidAliases.slice(1)) {
+      const splitName = makeUniqueContactName({ contacts: next }, baseName, lidAlias)
+      next.push(normalizeContactInput({
+        name: splitName,
+        jid: lidAlias,
+        aliasJids: [],
+        tags: []
+      }))
+    }
+
+    changed = true
+  }
+
+  if (changed) {
+    store.contacts = next
+  }
+
+  return changed
+}
+
 function pickPreferredPrimaryJid(currentJidRaw = '', incomingJidRaw = '', msisdnRaw = '') {
   const currentJid = normalizeJid(currentJidRaw)
   const incomingJid = normalizeJid(incomingJidRaw)
@@ -3465,72 +3552,11 @@ function normalizeContactsStore(storeRaw) {
   }
 
   if (dedupeContactsByIdentity(deduped)) {
-    // keep processing below so any remaining name-based cleanup also applies
+    // identity-based dedupe already handled above
   }
 
-  // Merge leftover name-collision duplicates like "Name" and "Name (1234)"
-  // when one side is LID and the other is phone-based JID.
-  const rows = [...deduped.contacts]
-  const byBaseName = new Map()
-
-  for (let i = 0; i < rows.length; i++) {
-    const name = String(rows[i]?.name || '').trim()
-    if (!name || looksLikeAutoSuffixName(name)) continue
-    byBaseName.set(norm(name), i)
-  }
-
-  const removed = new Set()
-
-  for (let i = 0; i < rows.length; i++) {
-    if (removed.has(i)) continue
-    const cur = rows[i]
-    const curName = String(cur?.name || '').trim()
-    const baseName = stripAutoSuffixName(curName)
-
-    if (!looksLikeAutoSuffixName(curName) || !baseName) {
-      continue
-    }
-
-    const targetIdx = byBaseName.get(norm(baseName))
-    if (targetIdx == null || targetIdx === i || removed.has(targetIdx)) {
-      continue
-    }
-
-    const target = rows[targetIdx]
-    const curJid = normalizeJid(cur?.jid || '')
-    const targetJid = normalizeJid(target?.jid || '')
-    const lidInvolved = curJid.endsWith('@lid') || targetJid.endsWith('@lid')
-    const phoneJidInvolved = curJid.endsWith('@s.whatsapp.net') || targetJid.endsWith('@s.whatsapp.net') || curJid.endsWith('@w.whatsapp.net') || targetJid.endsWith('@w.whatsapp.net')
-
-    if (!(lidInvolved && phoneJidInvolved)) {
-      continue
-    }
-
-    const mergedTags = Array.from(new Set([...(Array.isArray(target.tags) ? target.tags : []), ...(Array.isArray(cur.tags) ? cur.tags : [])]))
-    const preferredJid = (targetJid.endsWith('@s.whatsapp.net') || targetJid.endsWith('@w.whatsapp.net'))
-      ? targetJid
-      : ((curJid.endsWith('@s.whatsapp.net') || curJid.endsWith('@w.whatsapp.net')) ? curJid : (targetJid || curJid || ''))
-    const mergedAliasJids = normalizeAliasJids([
-      ...(Array.isArray(target.aliasJids) ? target.aliasJids : []),
-      ...(Array.isArray(cur.aliasJids) ? cur.aliasJids : []),
-      targetJid,
-      curJid
-    ], preferredJid)
-
-    rows[targetIdx] = {
-      ...target,
-      tags: mergedTags,
-      jid: preferredJid || target.jid || cur.jid || '',
-      aliasJids: mergedAliasJids,
-      msisdn: String(target.msisdn || cur.msisdn || '').trim(),
-      msisdnIntl: String(target.msisdnIntl || cur.msisdnIntl || '').trim(),
-      name: pickPreferredContactName(target.name, baseName)
-    }
-    removed.add(i)
-  }
-
-  if (removed.size) {
-    deduped.contacts = rows.filter((_, idx) => !removed.has(idx))
+  if (splitCollapsedContactAliases(deduped)) {
+    dedupeContactsByIdentity(deduped)
   }
 
   const before = JSON.stringify(base.contacts)
@@ -3706,7 +3732,7 @@ function upsertContact(store, contact, opts = {}) {
     })
   }
   // DO NOT fall back to name-based matching. Multiple different JIDs can have the same name.
-  // Name-based deduplication happens only during normalizeContactsStore() with proper LID↔phone logic.
+  // Do not merge by name here; same display names can belong to different contacts.
 
   if (idx >= 0) {
     const prev = store.contacts[idx] || {}
@@ -4012,30 +4038,6 @@ function autoAddInboundContact(senderJidRaw, displayNameRaw = '') {
       writeContactsStore(store)
     }
     return updated
-  }
-
-  // If no direct jid/msisdn match was found, try a safe same-name merge first.
-  // This avoids creating duplicate contacts when a manually-added phone contact
-  // later replies from a LID identity.
-  if (displayName) {
-    const nameMatches = (store.contacts || [])
-      .map((c, i) => ({ i, key: norm(c?.name || '') }))
-      .filter(x => x.key && x.key === norm(displayName))
-
-    if (nameMatches.length === 1) {
-      const idx = nameMatches[0].i
-      const existing = store.contacts[idx]
-      const { contact: updated, changed } = enrichContactIdentity(store, existing, {
-        jid,
-        msisdn: inboundMsisdn,
-        displayName
-      })
-      if (changed) {
-        store.contacts[idx] = updated
-        writeContactsStore(store)
-      }
-      return updated
-    }
   }
 
   if (!displayName) return null
@@ -4779,12 +4781,29 @@ let lastAutoRelinkAt = 0
 let reconnectAttemptCount = 0
 let lastNoQrRecoveryAt = 0
 let startWhatsAppInProgress = false
+let socketStartGeneration = 0
+const whatsappReconnectTimers = new Set()
 let walHandshakeInProgress = false  // true between makeWASocket() and first open/close event — suppresses DB key writes
 let preferLatestWaVersion = false   // auto-enabled after repeated 405 failures
 let waVersionFallbackIndex = -1     // -1 = try auto-fetch; >=0 = cycle through WA_KNOWN_VERSIONS
 let groupRefreshTimer = null
 let groupRefreshInFlight = null
 let lastGroupRefreshAttemptAt = 0
+
+function clearWhatsAppReconnectTimers() {
+  for (const timer of whatsappReconnectTimers) clearTimeout(timer)
+  whatsappReconnectTimers.clear()
+}
+
+function scheduleWhatsAppStart(delayMs, label) {
+  const generation = socketStartGeneration
+  const timer = setTimeout(() => {
+    whatsappReconnectTimers.delete(timer)
+    if (generation !== socketStartGeneration) return
+    startWhatsApp().catch((e) => console.warn(`⚠️ startWhatsApp (${label}) failed:`, e?.message))
+  }, Math.max(0, Number(delayMs || 0)))
+  whatsappReconnectTimers.add(timer)
+}
 
 async function clearAuthStorage() {
   await clearAuthFromDb().catch((e) => { console.warn('⚠️ Failed to clear auth from DB:', e?.message) })
@@ -4808,8 +4827,13 @@ async function triggerRelink(reason = 'manual', options = {}) {
   broadcast('status', { status: connectionStatus, hasQR: false, reason })
 
   try {
+    // Invalidate the old socket before closing it so delayed events and reconnects
+    // cannot race the replacement socket or overwrite its QR state.
+    socketStartGeneration += 1
+    clearWhatsAppReconnectTimers()
+    activeSocketToken += 1
     try { sock?.ws?.close?.() } catch {}
-    try { sock?.end?.() } catch {}
+    try { sock?.end?.(new Error(`Re-pair requested: ${reason}`)) } catch {}
     sock = null
 
     await new Promise(resolve => setTimeout(resolve, 300))
@@ -4818,9 +4842,17 @@ async function triggerRelink(reason = 'manual', options = {}) {
       await clearAuthStorage()
       logDiag('warn', 'wa.auth.cleared', '🧹 WA auth cleared for force re-pair', { reason })
     }
-    // Start WhatsApp connection asynchronously (don't wait for it to complete)
-    startWhatsApp().catch(e => console.warn('⚠️ startWhatsApp failed:', e?.message))
-    return { ok: true }
+
+    const startWaitDeadline = Date.now() + 10000
+    while (startWhatsAppInProgress && Date.now() < startWaitDeadline) {
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+    if (startWhatsAppInProgress) {
+      throw new Error('Previous WhatsApp socket initialization did not stop in time')
+    }
+
+    await startWhatsApp()
+    return { ok: true, status: connectionStatus }
   } finally {
     relinkInProgress = false
   }
@@ -5029,6 +5061,7 @@ async function resolveToJid(toRaw) {
  */
 function apiKeyMiddleware(req, res, next) {
   // public endpoints that must work without headers
+  if (req.path === '/health/ready') return next()
   if (req.path.startsWith('/pairing/')) return next()
   if (req.path.startsWith('/admin/')) return next()
   if (req.path.startsWith('/board/')) return next()
@@ -5621,11 +5654,12 @@ function adminLoginPageHtml(req) {
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Watson Login</title>
   <style>
-    body{margin:0;background:#0b0b10;color:#fff;font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,Arial;display:grid;place-items:center;min-height:100vh}
+    *{box-sizing:border-box}
+    body{margin:0;padding:16px;background:#0b0b10;color:#fff;font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,Arial;display:grid;place-items:center;min-height:100vh}
     .card{width:min(420px,92vw);background:#12121a;border:1px solid rgba(255,255,255,.12);border-radius:16px;padding:20px;box-shadow:0 16px 48px rgba(0,0,0,.45)}
     h1{margin:0 0 6px;font-size:20px}
     p{margin:0 0 14px;color:rgba(255,255,255,.7);font-size:13px}
-    input{width:100%;padding:10px 12px;border-radius:12px;border:1px solid rgba(255,255,255,.16);background:rgba(0,0,0,.32);color:#fff;outline:none}
+    input{display:block;width:100%;min-width:0;padding:10px 12px;border-radius:12px;border:1px solid rgba(255,255,255,.16);background:rgba(0,0,0,.32);color:#fff;outline:none}
     button{margin-top:12px;width:100%;padding:10px 12px;border-radius:12px;border:1px solid rgba(138,43,226,.55);background:linear-gradient(135deg, rgba(138,43,226,.35), rgba(177,76,255,.18));color:#fff;font-weight:700;cursor:pointer}
     .err{margin-top:10px;color:#ff9bad;font-size:12px;min-height:18px}
   </style>
@@ -5699,6 +5733,43 @@ let lastQRPngBufferVersion = 0
 let qrPngBuildPromise = null
 let lastQRDataUrl = ''
 
+async function getCurrentPairingQrPng() {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const qrSnapshot = lastQR
+    const versionSnapshot = lastQRUpdatedAt
+    if (!qrSnapshot || !versionSnapshot) return null
+
+    if (lastQRPngBuffer && lastQRPngBufferVersion === versionSnapshot) {
+      return lastQRPngBuffer
+    }
+
+    if (!qrPngBuildPromise || qrPngBuildPromise.version !== versionSnapshot) {
+      const build = QRCode.toBuffer(qrSnapshot, { type: 'png', width: 320 })
+      qrPngBuildPromise = { version: versionSnapshot, build }
+    }
+
+    const activeBuild = qrPngBuildPromise
+    let buffer
+    try {
+      buffer = await activeBuild.build
+    } catch (e) {
+      if (qrPngBuildPromise === activeBuild) qrPngBuildPromise = null
+      throw e
+    }
+    if (lastQR === qrSnapshot && lastQRUpdatedAt === versionSnapshot) {
+      lastQRPngBuffer = buffer
+      lastQRPngBufferVersion = versionSnapshot
+      lastQRDataUrl = `data:image/png;base64,${buffer.toString('base64')}`
+      if (qrPngBuildPromise === activeBuild) qrPngBuildPromise = null
+      return buffer
+    }
+
+    if (qrPngBuildPromise === activeBuild) qrPngBuildPromise = null
+  }
+
+  return null
+}
+
 // SSE
 const sseClients = new Set()
 const adminMessageSseClients = new Set()
@@ -5742,6 +5813,7 @@ function broadcastAdminMessageUpdate(chatJid, message, summary) {
 async function startWhatsApp() {
   if (startWhatsAppInProgress) return
   startWhatsAppInProgress = true
+  const requestedGeneration = socketStartGeneration
 
   try {
   connectionStatus = 'connecting'
@@ -5778,6 +5850,11 @@ async function startWhatsApp() {
     } else {
       console.log('📦 Using Baileys default WA Web version (WA_FORCE_LATEST_WEB_VERSION!=1)')
     }
+  }
+
+  if (requestedGeneration !== socketStartGeneration) {
+    logDiag('info', 'wa.connect.cancelled', 'ℹ️ Cancelled stale WhatsApp socket initialization')
+    return
   }
 
   sock = makeWASocket({
@@ -5910,11 +5987,20 @@ async function startWhatsApp() {
 
         broadcast('qr', { qr, qrUpdatedAt: lastQRUpdatedAt })
         broadcast('status', { status: connectionStatus, hasQR: true, qrUpdatedAt: lastQRUpdatedAt })
+        getCurrentPairingQrPng()
+          .then((buffer) => {
+            const qrVersion = lastQRPngBufferVersion
+            const qrDataUrl = lastQRDataUrl
+            if (!buffer || !qrDataUrl || qrVersion !== lastQRUpdatedAt) return
+            broadcast('qr', { qrUpdatedAt: qrVersion, qrDataUrl })
+          })
+          .catch((e) => console.warn('⚠️ Failed to prepare pairing QR image:', e?.message))
       }
     }
 
     if (connection === 'open') {
       clearTimeout(noQrGuard)
+      clearWhatsAppReconnectTimers()
       walHandshakeInProgress = false
       if (keysPersistPending) flushKeysPersist().catch(() => {})
       reconnectAttemptCount = 0
@@ -6010,9 +6096,7 @@ async function startWhatsApp() {
           return
         }
 
-        setTimeout(() => {
-          startWhatsApp().catch(e => console.warn('⚠️ startWhatsApp (405 retry) failed:', e?.message))
-        }, retryDelay)
+        scheduleWhatsAppStart(retryDelay, '405 retry')
         return
       }
 
@@ -6043,9 +6127,7 @@ async function startWhatsApp() {
       if (shouldReconnect) {
         const retryDelayMs = computeReconnectDelayMs(statusCode, reconnectAttemptCount)
         console.log(`🔄 Reconnect #${reconnectAttemptCount} in ${Math.round(retryDelayMs / 1000)}s (status: ${statusCode ?? 'n/a'})`)
-        setTimeout(() => {
-          startWhatsApp().catch((e) => console.warn('⚠️ startWhatsApp retry failed:', e?.message))
-        }, retryDelayMs)
+        scheduleWhatsAppStart(retryDelayMs, 'retry')
       }
       else {
         if (Number(statusCode) === 405) {
@@ -6606,6 +6688,9 @@ function initializeWorker(queueName) {
   worker.on('failed', (job, err) => {
     console.warn('❌ Queue job failed:', job?.id, err?.message || err)
   })
+  worker.on('error', (err) => {
+    console.warn('⚠️ Queue worker error:', err?.message || err)
+  })
 
   console.log(`🔲 Worker initialized for queue: ${queueName}`)
 }
@@ -6921,7 +7006,7 @@ function rebuildRateLimiter() {
     max: cfg.max,
     standardHeaders: true,
     legacyHeaders: false,
-    keyGenerator: (req) => clientIp(req) || String(req.ip || '') || 'unknown'
+    keyGenerator: (req) => ipKeyGenerator(clientIp(req) || String(req.ip || '') || 'unknown')
   })
   return cfg
 }
@@ -7080,6 +7165,17 @@ app.get('/health', async (req, res) => {
   })
 })
 
+app.get('/health/ready', (req, res) => {
+  const redisReady = redis.status === 'ready'
+  const ready = startupReady && redisReady && Boolean(sendQueue)
+  res.status(ready ? 200 : 503).json({
+    ok: ready,
+    startupReady,
+    redis: redis.status,
+    queueReady: Boolean(sendQueue)
+  })
+})
+
 
 /**
  * Pairing
@@ -7098,22 +7194,9 @@ async function servePairingQrPng(req, res) {
     res.setHeader('Expires', '0')
     res.setHeader('ETag', `"qr-${lastQRUpdatedAt}"`)
 
-    if (!lastQRPngBuffer || lastQRPngBufferVersion !== lastQRUpdatedAt) {
-      if (!qrPngBuildPromise) {
-        qrPngBuildPromise = QRCode.toBuffer(lastQR, { type: 'png', width: 320 })
-          .then((buf) => {
-            lastQRPngBuffer = buf
-            lastQRPngBufferVersion = lastQRUpdatedAt
-            return buf
-          })
-          .finally(() => {
-            qrPngBuildPromise = null
-          })
-      }
-      await qrPngBuildPromise
-    }
-
-    res.send(lastQRPngBuffer)
+    const buffer = await getCurrentPairingQrPng()
+    if (!buffer) return res.status(204).end()
+    res.send(buffer)
   } catch (err) {
     res.status(500).send(err?.message || 'Failed to generate QR PNG')
   }
@@ -7132,7 +7215,10 @@ function servePairingStream(req, res) {
 
   sseClients.add(res)
   sseSend(res, 'status', { status: connectionStatus, hasQR: Boolean(lastQR), qrUpdatedAt: lastQRUpdatedAt })
-  if (lastQR) sseSend(res, 'qr', { qr: lastQR, qrUpdatedAt: lastQRUpdatedAt })
+  if (lastQR) sseSend(res, 'qr', {
+    qrUpdatedAt: lastQRUpdatedAt,
+    ...(lastQRDataUrl ? { qrDataUrl: lastQRDataUrl } : {})
+  })
 
   const ping = setInterval(() => {
     try { res.write(`event: ping\ndata: {}\n\n`) } catch {}
@@ -9245,6 +9331,8 @@ const scheduleTimer = setInterval(() => {
 }, Math.max(1000, SCHEDULE_POLL_MS))
 
 async function shutdown() {
+  startupReady = false
+  clearWhatsAppReconnectTimers()
   try { clearInterval(groupCacheSyncTimer) } catch {}
   try { clearInterval(scheduleTimer) } catch {}
   try { await worker?.close() } catch {}
@@ -9359,21 +9447,30 @@ app.listen(PORT, async () => {
   if (!REQUIRE_API_KEY) console.log('⚠️ WARNING: WA_API_KEY not set. Set it in .env before VPS.')
   if (!REQUIRE_ADMIN_KEY) console.log('⚠️ WARNING: Admin keys not set (WA_ADMIN_KEY / WA_OPERATOR_KEY / WA_VIEWER_KEY). Admin UI/API will not work.')
 
-  await initDatabaseStorage()
-  runtimeSettings = (await readRuntimeSettingsFromDb()) || readRuntimeSettingsStore()
-  rebuildRateLimiter()
-  await hydrateStoresFromDb()
-  responseRules = readRulesStore()
-  await hydrateInMemoryFromStore()
-  loadBoards()
+  try {
+    await waitForRedisReady()
+    console.log('✅ Redis ready')
+    await initDatabaseStorage()
+    runtimeSettings = (await readRuntimeSettingsFromDb()) || readRuntimeSettingsStore()
+    rebuildRateLimiter()
+    await hydrateStoresFromDb()
+    responseRules = readRulesStore()
+    await hydrateInMemoryFromStore()
+    loadBoards()
 
-  processDueSchedules().catch(() => {})
+    processDueSchedules().catch(() => {})
 
-  const autoClearAuthOnBoot = String(process.env.WA_AUTO_CLEAR_AUTH_ON_BOOT || '0').trim() === '1'
-  if (autoClearAuthOnBoot) {
-    await clearAuthStorage().catch(() => {})
-    console.log('🧹 Auto-cleared auth on boot (WA_AUTO_CLEAR_AUTH_ON_BOOT=1)')
+    const autoClearAuthOnBoot = String(process.env.WA_AUTO_CLEAR_AUTH_ON_BOOT || '0').trim() === '1'
+    if (autoClearAuthOnBoot) {
+      await clearAuthStorage().catch(() => {})
+      console.log('🧹 Auto-cleared auth on boot (WA_AUTO_CLEAR_AUTH_ON_BOOT=1)')
+    }
+
+    await startWhatsApp()
+    startupReady = true
+  } catch (e) {
+    console.error('❌ Startup failed:', e?.message || e)
+    process.exitCode = 1
+    setTimeout(() => process.exit(1), 100)
   }
-
-  await startWhatsApp()
 })

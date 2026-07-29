@@ -4,6 +4,12 @@ services:
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 2s
     restart: unless-stopped
 
   wa-api:
@@ -18,8 +24,16 @@ services:
     volumes:
       - ./uploads:/app/uploads
       - ./data:/data
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
+        restart: true
     restart: unless-stopped
 
   nginx:
@@ -29,7 +43,9 @@ services:
     volumes:
       - ./nginx/conf.d:/etc/nginx/conf.d:ro
     depends_on:
-      - wa-api
+      wa-api:
+        condition: service_healthy
+        restart: true
     restart: unless-stopped
 
 volumes:

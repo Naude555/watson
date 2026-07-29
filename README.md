@@ -205,6 +205,7 @@ MEDIA_SIGNING_SECRET | Media URL signing |
 | Variable | Description |
 |----------|-------------|
 REDIS_URL | Redis connection string |
+REDIS_STARTUP_TIMEOUT_MS | Maximum startup wait for Redis readiness (default `60000`) |
 WA_QUEUE_NAME | Queue name |
 
 ## Storage (PostgreSQL with SQLite fallback)
