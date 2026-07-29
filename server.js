@@ -1264,15 +1264,56 @@ async function writeAuthKeysToDb(data = {}) {
 // In-memory cache for Baileys signal-protocol keys.
 // Keeps keys.get/set off the hot DB path so the event loop never blocks during WA handshake.
 let waAuthKeysCache = {} // { [type]: { [id]: value } }
+const authPersistenceOperations = new Set()
+
+function trackAuthPersistence(operation) {
+  const promise = Promise.resolve(operation)
+  authPersistenceOperations.add(promise)
+  promise.finally(() => authPersistenceOperations.delete(promise)).catch(() => {})
+  return promise
+}
+
+async function waitForAuthPersistence() {
+  if (!authPersistenceOperations.size) return
+  await Promise.allSettled([...authPersistenceOperations])
+}
 
 async function clearAuthFromDb() {
-  await deleteKvFromDb(AUTH_CREDS_DB_KEY).catch(() => {})
+  const credsDeleted = await deleteKvFromDb(AUTH_CREDS_DB_KEY)
+  if (!credsDeleted) throw new Error('Authentication credential storage is unavailable')
+
   if (pgPool) {
-    await pgPool.query('DELETE FROM wa_auth_keys').catch(() => {})
+    await pgPool.query('DELETE FROM wa_auth_keys')
   } else if (sqliteDb) {
-    try { sqliteDb.prepare('DELETE FROM wa_auth_keys').run() } catch {}
+    sqliteDb.prepare('DELETE FROM wa_auth_keys').run()
+  } else {
+    throw new Error('Authentication key storage is unavailable')
   }
+
+  waAuthCreds = null
   waAuthKeysCache = {}
+}
+
+async function getPersistedAuthCounts() {
+  if (pgPool) {
+    const [credsResult, keysResult] = await Promise.all([
+      pgPool.query('SELECT COUNT(*)::int AS count FROM kv_store WHERE key = $1', [AUTH_CREDS_DB_KEY]),
+      pgPool.query('SELECT COUNT(*)::int AS count FROM wa_auth_keys')
+    ])
+    return {
+      creds: Number(credsResult.rows?.[0]?.count || 0),
+      keys: Number(keysResult.rows?.[0]?.count || 0)
+    }
+  }
+
+  if (sqliteDb) {
+    return {
+      creds: Number(sqliteDb.prepare('SELECT COUNT(*) AS count FROM kv_store WHERE key = ?').get(AUTH_CREDS_DB_KEY)?.count || 0),
+      keys: Number(sqliteDb.prepare('SELECT COUNT(*) AS count FROM wa_auth_keys').get()?.count || 0)
+    }
+  }
+
+  throw new Error('Authentication storage is unavailable')
 }
 
 async function preloadAuthKeysToCache() {
@@ -4786,6 +4827,7 @@ const whatsappReconnectTimers = new Set()
 let walHandshakeInProgress = false  // true between makeWASocket() and first open/close event — suppresses DB key writes
 let preferLatestWaVersion = false   // auto-enabled after repeated 405 failures
 let waVersionFallbackIndex = -1     // -1 = try auto-fetch; >=0 = cycle through WA_KNOWN_VERSIONS
+let freshPairingMode = false         // ignore stale version overrides/fallbacks until a forced fresh pair connects
 let groupRefreshTimer = null
 let groupRefreshInFlight = null
 let lastGroupRefreshAttemptAt = 0
@@ -4806,8 +4848,15 @@ function scheduleWhatsAppStart(delayMs, label) {
 }
 
 async function clearAuthStorage() {
-  await clearAuthFromDb().catch((e) => { console.warn('⚠️ Failed to clear auth from DB:', e?.message) })
-  console.log('🧹 Cleared auth credentials from DB')
+  // Socket generation is invalidated before this call, so no new writes from the
+  // old socket can be queued. Drain anything already in flight before deletion.
+  await waitForAuthPersistence()
+  await clearAuthFromDb()
+  const remaining = await getPersistedAuthCounts()
+  if (remaining.creds > 0 || remaining.keys > 0) {
+    throw new Error(`Authentication clear verification failed (creds=${remaining.creds}, keys=${remaining.keys})`)
+  }
+  console.log('🧹 Cleared and verified auth credentials (creds=0, keys=0)')
 }
 
 async function triggerRelink(reason = 'manual', options = {}) {
@@ -4839,6 +4888,10 @@ async function triggerRelink(reason = 'manual', options = {}) {
     await new Promise(resolve => setTimeout(resolve, 300))
 
     if (clearAuth) {
+      freshPairingMode = true
+      preferLatestWaVersion = true
+      waVersionFallbackIndex = -1
+      reconnectAttemptCount = 0
       await clearAuthStorage()
       logDiag('warn', 'wa.auth.cleared', '🧹 WA auth cleared for force re-pair', { reason })
     }
@@ -4852,7 +4905,7 @@ async function triggerRelink(reason = 'manual', options = {}) {
     }
 
     await startWhatsApp()
-    return { ok: true, status: connectionStatus }
+    return { ok: true, status: connectionStatus, authCleared: clearAuth, freshPairingMode }
   } finally {
     relinkInProgress = false
   }
@@ -5823,17 +5876,23 @@ async function startWhatsApp() {
   // Preload all auth keys into memory cache BEFORE handshake to avoid sync DB hits
   await preloadAuthKeysToCache()
 
-  let waVersion = parseWaVersionOverride(WA_WEB_VERSION_OVERRIDE) || undefined
+  const configuredVersionOverride = parseWaVersionOverride(WA_WEB_VERSION_OVERRIDE) || undefined
+  const bypassConfiguredVersions = freshPairingMode || preferLatestWaVersion
+  let waVersion = bypassConfiguredVersions ? undefined : configuredVersionOverride
+  if (bypassConfiguredVersions && configuredVersionOverride) {
+    const reason = freshPairingMode ? 'fresh pairing' : '405 recovery'
+    console.log(`📦 ${reason}: bypassing WA_WEB_VERSION_OVERRIDE:`, configuredVersionOverride.join('.'))
+  }
   if (waVersion) {
     console.log('📦 Using WA Web version override from WA_WEB_VERSION_OVERRIDE:', waVersion.join('.'))
-  } else if (waVersionFallbackIndex >= 0 && WA_KNOWN_VERSIONS.length > 0) {
+  } else if (!bypassConfiguredVersions && waVersionFallbackIndex >= 0 && WA_KNOWN_VERSIONS.length > 0) {
     // A 405 occurred previously — cycle through the known-good fallback list
     const idx = waVersionFallbackIndex % WA_KNOWN_VERSIONS.length
     waVersion = WA_KNOWN_VERSIONS[idx]
     console.log(`📦 Using fallback WA Web version [${idx + 1}/${WA_KNOWN_VERSIONS.length}]: ${waVersion.join('.')} (after ${waVersionFallbackIndex} 405 attempt(s))`)
   } else {
     // No override, no 405 yet — try auto-fetching the latest supported version
-    const forceLatest = String(process.env.WA_FORCE_LATEST_WEB_VERSION || '').trim() === '1' || preferLatestWaVersion
+    const forceLatest = freshPairingMode || String(process.env.WA_FORCE_LATEST_WEB_VERSION || '').trim() === '1' || preferLatestWaVersion
     if (forceLatest) {
       try {
         const info = await fetchLatestBaileysVersion()
@@ -5867,6 +5926,7 @@ async function startWhatsApp() {
 
   const socketToken = ++activeSocketToken
   const thisSock = sock
+  const isActiveSocket = () => sock === thisSock && socketToken === activeSocketToken
   walHandshakeInProgress = true  // suppress DB writes until open/close fires
 
   const noQrGuard = setTimeout(async () => {
@@ -5896,6 +5956,10 @@ async function startWhatsApp() {
   let keysPersistPending = null
 
   const flushCredsPersist = async () => {
+    if (!isActiveSocket()) {
+      credsPersistPending = false
+      return
+    }
     if (credsPersistRunning) {
       credsPersistPending = true
       return
@@ -5903,12 +5967,12 @@ async function startWhatsApp() {
 
     credsPersistRunning = true
     try {
-      await saveCreds()
+      await trackAuthPersistence(saveCreds())
     } catch (e) {
       console.warn('⚠️ Failed to persist WA creds:', e?.message)
     } finally {
       credsPersistRunning = false
-      if (credsPersistPending) {
+      if (credsPersistPending && isActiveSocket()) {
         credsPersistPending = false
         queueCredsPersist()
       }
@@ -5916,6 +5980,7 @@ async function startWhatsApp() {
   }
 
   const queueCredsPersist = () => {
+    if (!isActiveSocket()) return
     if (credsPersistTimer) return
     credsPersistTimer = setTimeout(() => {
       credsPersistTimer = null
@@ -5925,14 +5990,24 @@ async function startWhatsApp() {
   
   const flushKeysPersist = async () => {
     if (!keysPersistPending) return
+    if (!isActiveSocket()) {
+      keysPersistPending = null
+      return
+    }
     const toWrite = keysPersistPending
     keysPersistPending = null
-    // Yield to the event loop before the synchronous SQLite transaction runs
-    await new Promise(resolve => setImmediate(resolve))
-    await writeAuthKeysToDb(toWrite).catch(e => console.warn('⚠️ auth keys flush error:', e?.message))
+    const persistence = (async () => {
+      // Yield before synchronous SQLite work, then re-check the socket fence.
+      await new Promise(resolve => setImmediate(resolve))
+      if (!isActiveSocket()) return false
+      return await writeAuthKeysToDb(toWrite)
+    })()
+    await trackAuthPersistence(persistence)
+      .catch(e => console.warn('⚠️ auth keys flush error:', e?.message))
   }
   
   const queueKeysPersist = (data) => {
+    if (!isActiveSocket()) return
     // Always update in-memory cache (no I/O)
     keysPersistPending = keysPersistPending || {}
     for (const [type, vals] of Object.entries(data || {})) {
@@ -5955,11 +6030,15 @@ async function startWhatsApp() {
   // Intercept keys.set to batch the writes
   const originalKeySet = state.keys.set
   state.keys.set = async (data) => {
+    if (!isActiveSocket()) return
     await originalKeySet(data)
     queueKeysPersist(data)
   }
 
-  sock.ev.on('creds.update', queueCredsPersist)
+  sock.ev.on('creds.update', () => {
+    if (!isActiveSocket()) return
+    queueCredsPersist()
+  })
 
   sock.ev.on('connection.update', async (update) => {
     if (sock !== thisSock || socketToken !== activeSocketToken) return
@@ -6006,6 +6085,7 @@ async function startWhatsApp() {
       reconnectAttemptCount = 0
       waVersionFallbackIndex = -1     // reset: next connect will auto-fetch latest again
       preferLatestWaVersion = false   // cleared by successful connect
+      freshPairingMode = false
       connectionStatus = 'open'
       lastQR = null
       lastQRUpdatedAt = 0
@@ -6065,7 +6145,7 @@ async function startWhatsApp() {
         console.log('⚠️ Logged out detected. Auto relink initiated...')
         broadcast('status', { status: connectionStatus, hasQR: false, relinking: true, qrUpdatedAt: lastQRUpdatedAt })
         try {
-          await triggerRelink('logged-out')
+          await triggerRelink('logged-out', { clearAuth: true })
         } catch (e) {
           console.warn('❌ Auto relink failed:', e?.message)
         }
@@ -6076,7 +6156,9 @@ async function startWhatsApp() {
         // 405 is often transient WA-side connection failure/rate-limiting.
         // Keep auth intact. Auth reset is manual-only from Pairing > Force Re-pair.
         preferLatestWaVersion = true
-        waVersionFallbackIndex = Math.max(0, waVersionFallbackIndex + 1)  // advance fallback version for next retry
+        if (!freshPairingMode) {
+          waVersionFallbackIndex = Math.max(0, waVersionFallbackIndex + 1)  // advance fallback version for next retry
+        }
 
         const retryDelay = computeStatus405DelayMs(reconnectAttemptCount)
         console.log(`⚠️ Status 405 detected. Retrying in ${Math.round(retryDelay / 1000)}s (auth preserved, latest WA version preferred).`)
@@ -8104,7 +8186,12 @@ app.post('/admin/force-relink', adminKeyMiddleware, async (req, res) => {
       return res.status(409).json({ ok: false, error: 'Relink already in progress' })
     }
     logDiag('warn', 'wa.relink.forced', '🛠️ Force re-pair triggered from admin UI', { adminAuthMode: req.adminAuthMode || 'unknown' })
-    res.json({ ok: true, status: connectionStatus })
+    res.json({
+      ok: true,
+      status: connectionStatus,
+      authCleared: Boolean(result?.authCleared),
+      freshPairingMode: Boolean(result?.freshPairingMode)
+    })
   } catch (e) {
     res.status(500).json({ ok: false, error: e?.message || 'Failed to force relink' })
   }
