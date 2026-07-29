@@ -207,6 +207,13 @@ function showPanel(name, btnEl) {
     // Sync active state across sidebar nav + mobile nav using data-panel attribute
     document.querySelectorAll('.nav-item, .mob-nav-item').forEach(b => b.classList.remove('active'));
     document.querySelectorAll(`[data-panel="${name}"]`).forEach(b => b.classList.add('active'));
+
+    const mobileNav = document.getElementById('mobileNav');
+    const mobileTarget = mobileNav?.querySelector(`.mob-nav-item[data-panel="${name}"]`);
+    if (mobileNav && mobileTarget && window.matchMedia('(max-width: 768px)').matches) {
+      const left = mobileTarget.offsetLeft - ((mobileNav.clientWidth - mobileTarget.offsetWidth) / 2);
+      mobileNav.scrollTo({ left: Math.max(0, left), behavior: 'smooth' });
+    }
   
   const titles = {
     messages: 'Messages',
@@ -228,6 +235,9 @@ function showPanel(name, btnEl) {
     refreshQr({ quiet: true, force: true });
   }
   if (name === 'messages') {
+    if (window.matchMedia('(max-width: 768px)').matches && btnEl?.classList?.contains('mob-nav-item')) {
+      mobileBackToChats();
+    }
     connectMessagesStream();
     handleUiResume();
   }
@@ -4203,7 +4213,10 @@ async function init() {
     window.addEventListener('focus', handleUiResume);
 
     const sel = document.getElementById('chatSelect');
-    if (sel && sel.options.length > 1) {
+    const mobileLayout = window.matchMedia('(max-width: 768px)').matches;
+    if (mobileLayout) {
+      mobileBackToChats();
+    } else if (sel && sel.options.length > 1) {
       sel.selectedIndex = 1;
       await selectChat();
     }

@@ -1200,6 +1200,8 @@
       overflow-y: hidden;
       -webkit-overflow-scrolling: touch;
       overscroll-behavior-x: contain;
+      scroll-snap-type: x proximity;
+      scroll-padding-inline: 16px;
       scrollbar-width: none;
       align-items: stretch;
     }
@@ -1221,6 +1223,7 @@
       border-radius: 0 !important;
       cursor: pointer;
       flex-shrink: 0;
+      scroll-snap-align: center;
       transform: none !important;
       transition: color 0.15s, border-top-color 0.15s;
       position: relative;
@@ -2254,6 +2257,10 @@
       <span class="mob-nav-icon">🧠</span>
       <span class="mob-nav-label">Rules</span>
     </button>
+    <button class="mob-nav-item" data-panel="webhooks" onclick="showPanel('webhooks', this)">
+      <span class="mob-nav-icon">🔔</span>
+      <span class="mob-nav-label">Webhooks</span>
+    </button>
     <button class="mob-nav-item" data-panel="templates" onclick="showPanel('templates', this)">
       <span class="mob-nav-icon">🧩</span>
       <span class="mob-nav-label">Templates</span>
@@ -2270,6 +2277,6 @@
 
   <div class="toast hidden" id="toast"></div>
   
-  <script src="assets/admin-v2.js?v=20260601-01"></script>
+  <script src="assets/admin-v2.js?v=20260729-02"></script>
 </body>
 </html>

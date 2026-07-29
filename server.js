@@ -5712,8 +5712,13 @@ function adminLoginPageHtml(req) {
     .card{width:min(420px,92vw);background:#12121a;border:1px solid rgba(255,255,255,.12);border-radius:16px;padding:20px;box-shadow:0 16px 48px rgba(0,0,0,.45)}
     h1{margin:0 0 6px;font-size:20px}
     p{margin:0 0 14px;color:rgba(255,255,255,.7);font-size:13px}
-    input{display:block;width:100%;min-width:0;padding:10px 12px;border-radius:12px;border:1px solid rgba(255,255,255,.16);background:rgba(0,0,0,.32);color:#fff;outline:none}
-    button{margin-top:12px;width:100%;padding:10px 12px;border-radius:12px;border:1px solid rgba(138,43,226,.55);background:linear-gradient(135deg, rgba(138,43,226,.35), rgba(177,76,255,.18));color:#fff;font-weight:700;cursor:pointer}
+    label{display:block;margin-bottom:6px;color:rgba(255,255,255,.82);font-size:12px;font-weight:600}
+    .key-field{position:relative}
+    input{display:block;width:100%;min-width:0;padding:10px 68px 10px 12px;border-radius:12px;border:1px solid rgba(255,255,255,.16);background:rgba(0,0,0,.32);color:#fff;outline:none}
+    input:focus{border-color:rgba(177,76,255,.7);box-shadow:0 0 0 3px rgba(177,76,255,.12)}
+    .toggle-key{position:absolute;top:50%;right:6px;transform:translateY(-50%);width:auto;min-width:52px;margin:0;padding:7px 9px;border:0;border-radius:8px;background:transparent;color:rgba(255,255,255,.72);font-size:12px;font-weight:700;cursor:pointer}
+    .toggle-key:hover,.toggle-key:focus-visible{background:rgba(255,255,255,.08);color:#fff;outline:none}
+    .login-btn{margin-top:12px;width:100%;padding:10px 12px;border-radius:12px;border:1px solid rgba(138,43,226,.55);background:linear-gradient(135deg, rgba(138,43,226,.35), rgba(177,76,255,.18));color:#fff;font-weight:700;cursor:pointer}
     .err{margin-top:10px;color:#ff9bad;font-size:12px;min-height:18px}
   </style>
 </head>
@@ -5721,14 +5726,27 @@ function adminLoginPageHtml(req) {
   <form class="card" method="post" action="${loginAction}">
     <h1>Watson Admin Login</h1>
     <p>Enter an admin, operator, or viewer key to access the dashboard.</p>
-    <input type="password" name="adminKey" placeholder="WA_ADMIN_KEY / WA_OPERATOR_KEY / WA_VIEWER_KEY" autocomplete="current-password" required />
-    <button type="submit">Login</button>
+    <label for="adminKey">Access key</label>
+    <div class="key-field">
+      <input id="adminKey" type="password" name="adminKey" placeholder="WA_ADMIN_KEY / WA_OPERATOR_KEY / WA_VIEWER_KEY" autocomplete="current-password" required />
+      <button class="toggle-key" id="toggleKey" type="button" aria-controls="adminKey" aria-pressed="false">Show</button>
+    </div>
+    <button class="login-btn" type="submit">Login</button>
     <div class="err" id="err"></div>
   </form>
   <script>
     const q = new URLSearchParams(location.search);
     const e = q.get('e');
     if (e) document.getElementById('err').textContent = decodeURIComponent(e);
+    const keyInput = document.getElementById('adminKey');
+    const toggleKey = document.getElementById('toggleKey');
+    toggleKey.addEventListener('click', () => {
+      const show = keyInput.type === 'password';
+      keyInput.type = show ? 'text' : 'password';
+      toggleKey.textContent = show ? 'Hide' : 'Show';
+      toggleKey.setAttribute('aria-pressed', String(show));
+      keyInput.focus({ preventScroll: true });
+    });
   </script>
 </body>
 </html>`
