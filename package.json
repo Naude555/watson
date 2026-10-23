@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@whiskeysockets/baileys": "7.0.0-rc14",
+    "better-sqlite3": "^11.8.1",
     "bullmq": "^5.67.3",
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
